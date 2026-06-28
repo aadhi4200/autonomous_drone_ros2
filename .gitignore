@@ -1,0 +1,22 @@
+# ROS2 build artifacts
+build/
+install/
+log/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Generated textures
+simulation/gazebo/models/aruco_17/materials/textures/aruco_17.png
+
+# Node/React
+src/drone_dashboard/node_modules/
+src/drone_dashboard/dist/
+src/drone_dashboard/.env
+
+# OS
+.DS_Store
+*.swp
+*.swo
