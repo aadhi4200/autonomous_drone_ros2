@@ -46,6 +46,41 @@ class WaypointNavigator(Node):
             "D": Waypoint(10.850800, 76.271600, label="POINT_D"),
         }
 
+        # ====================================================================================================
+        
+        # self.create_subscription(
+        #     String, "/mission/waypoints",
+        #     self._waypoints_cb, 10)
+
+        # # Add this callback
+        # def _waypoints_cb(self, msg: String):
+        #     """Receive GPS waypoints from frontend via MissionManager."""
+        #     import json
+        #     data = json.loads(msg.data)
+
+        #     # Always add home as A
+        #     if self.home_lat is not None:
+        #         self.waypoints["A"] = Waypoint(
+        #             self.home_lat, self.home_lon, label="HOME")
+
+        #     # Add frontend waypoints as B, C, D...
+        #     for wp in data:
+        #         key = wp.get("label", "B")
+        #         self.waypoints[key] = Waypoint(
+        #             lat   = wp["lat"],
+        #             lon   = wp["lon"],
+        #             alt   = wp.get("alt", 5.0),
+        #             label = wp.get("label", key)
+        #         )
+        #         self.get_logger().info(
+        #             f"Waypoint added: {key} → "
+        #             f"({wp['lat']:.6f}, {wp['lon']:.6f})")
+
+
+        #========================================================================================================
+
+
+
         self.current_pos     = None
         self.home_lat = self.home_lon = None
         self.nav_state       = self.NAV_IDLE

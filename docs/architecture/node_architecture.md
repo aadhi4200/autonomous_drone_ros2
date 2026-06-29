@@ -29,3 +29,54 @@ IDLE → PREFLIGHT → TAKEOFF → GOTO_WAYPOINT → ARUCO_LAND
                                                        ↓
                                              MISSION_COMPLETE
 ```
+
+
+How All 6 Nodes Talk to Each Other
+/mission/command  ──→  MissionManager
+                            │
+              ┌─────────────┼──────────────┐
+              ↓             ↓              ↓
+        /drone_base/   /waypoint_nav/  /aruco_landing/
+         command        command         command
+              ↓             ↓              ↓
+        DroneBase    WaypointNav    ArucoLanding
+              ↓             ↓              ↑
+        /drone_base/  /waypoint_nav/  /vision/
+         status        status       landing_target
+              ↑             ↑              ↑
+              └─────────────┘         VisionNode
+                                           ↑
+                                      /camera/image_raw
+                                           ↑
+                                       CameraNode
+                                           ↑
+                                     Gazebo Camera
+
+
+
+Full state flow:
+IDLE
+  ↓ (START command received)
+PREFLIGHT     → check MAVROS connected
+  ↓
+TAKEOFF       → climb to 5m
+  ↓
+GOTO_WAYPOINT → fly to B
+  ↓
+ARUCO_LAND    → precision land at B
+  ↓
+WAIT          → 5 second payload drop
+  ↓
+INTER_TAKEOFF → climb again
+  ↓
+GOTO_WAYPOINT → fly to C
+  ↓
+...repeat for D...
+  ↓
+RETURN_HOME   → fly back to A
+  ↓
+HOME_LAND     → final landing
+  ↓
+COMPLETE      🏁
+
+
