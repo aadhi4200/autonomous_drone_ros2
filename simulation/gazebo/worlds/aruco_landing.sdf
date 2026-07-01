@@ -1,7 +1,7 @@
 <?xml version="1.0" ?>
 <sdf version="1.9">
   <world name="aruco_landing">
-    <physics name="1ms" type="ignored">
+    <physics name="1ms" type="ignore">
       <max_step_size>0.001</max_step_size>
       <real_time_factor>1.0</real_time_factor>
     </physics>
@@ -14,8 +14,24 @@
     <plugin filename="gz-sim-imu-system"               name="gz::sim::systems::Imu"/>
     <plugin filename="gz-sim-air-pressure-system"      name="gz::sim::systems::AirPressure"/>
     <plugin filename="gz-sim-magnetometer-system"      name="gz::sim::systems::Magnetometer"/>
+    <!-- ****** ADDED: without this, sensor_gps never publishes ****** -->
+    <plugin filename="gz-sim-navsat-system"            name="gz::sim::systems::NavSat"/>
 
     <magnetic_field>5.565e-06 2.2868e-05 -4.2689e-05</magnetic_field>
+
+    <!-- ****** ADDED: required for NavSat to compute lat/lon at all ******
+         Currently set to PX4 default (Zurich). If you use SIM_HOME_LAT /
+         SIM_HOME_LON overrides anywhere (e.g. your Bangalore waypoint
+         calcs), change latitude_deg / longitude_deg below to match
+         EXACTLY, or GPS will publish but disagree with your param
+         overrides and can still trip EKF2 sanity checks. -->
+    <spherical_coordinates>
+      <surface_model>EARTH_WGS84</surface_model>
+      <world_frame_orientation>ENU</world_frame_orientation>
+      <latitude_deg>47.397742</latitude_deg>
+      <longitude_deg>8.545594</longitude_deg>
+      <elevation>488.0</elevation>
+    </spherical_coordinates>
 
     <light type="directional" name="sun">
       <cast_shadows>true</cast_shadows>
@@ -24,7 +40,6 @@
       <specular>0.2 0.2 0.2 1</specular>
       <direction>-0.5 0.1 -0.9</direction>
     </light>
-
     <model name="ground_plane">
       <static>true</static>
       <link name="link">
@@ -37,7 +52,6 @@
         </visual>
       </link>
     </model>
-
     <!-- ArUco pad at Point B (10m north) -->
     <model name="aruco_pad_B">
       <static>true</static>
@@ -55,7 +69,6 @@
         </collision>
       </link>
     </model>
-
     <!-- ArUco pad at Point C (20m north) -->
     <model name="aruco_pad_C">
       <static>true</static>
@@ -73,7 +86,6 @@
         </collision>
       </link>
     </model>
-
     <!-- ArUco pad at Point D (30m north) -->
     <model name="aruco_pad_D">
       <static>true</static>
@@ -91,6 +103,5 @@
         </collision>
       </link>
     </model>
-
   </world>
 </sdf>
