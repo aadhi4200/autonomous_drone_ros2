@@ -373,4 +373,7 @@ ros2 topic pub /mission/command std_msgs/msg/String "data: 'START'" --once
 
 ## License
 
+
+gz sim ~/PX4-Autopilot/Tools/simulation/gz/worlds/aruco_landing.sdf
+
 MIT License © 2024 [aadhi4200](https://github.com/aadhi4200)
