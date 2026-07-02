@@ -97,8 +97,8 @@ pip install mavsdk pymavlink
 # STAGE 7: Your project repo
 # ============================================================
 cd ~
-git clone https://github.com/aadhi4200/Drone-A-to-B-waypoint-Nav-system.git
-cd Drone-A-to-B-waypoint-Nav-system
+git clone https://github.com/aadhi4200/autonomous_drone_ros2.git
+cd autonomous_drone_ros2
 # pip install -r requirements.txt   # uncomment once repo has one
 
 # ============================================================
