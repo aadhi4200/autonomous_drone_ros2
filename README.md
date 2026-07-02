@@ -336,7 +336,7 @@ ros2 run ros_gz_bridge parameter_bridge \
 # Terminal 4 — All nodes
 source ~/drone_ws/install/setup.bash
 ros2 launch drone_bringup full_mission.launch.py
-
+ros2 launch drone_bringup full_mission.launch.py
 # Terminal 5 — Start mission
 source ~/drone_ws/install/setup.bash
 ros2 topic pub /mission/command std_msgs/msg/String "data: 'START'" --once
