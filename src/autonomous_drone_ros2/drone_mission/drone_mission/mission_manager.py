@@ -103,11 +103,23 @@ class MissionManager(Node):
         self._send_base("TAKEOFF")
         self._enter(MS.TAKEOFF)
 
+    # def _takeoff(self):
+    #     if self._elapsed() > TAKEOFF_TIMEOUT:
+    #         self._abort(); return
+    #     if self.base_status == "AIRBORNE" and self.altitude >= TAKEOFF_ALT * 0.85:
+    #         self.get_logger().info(f"✅ Airborne {self.altitude:.1f}m → first waypoint")
+    #         self._goto_next()
     def _takeoff(self):
         if self._elapsed() > TAKEOFF_TIMEOUT:
-            self._abort(); return
-        if self.base_status == "AIRBORNE" and self.altitude >= TAKEOFF_ALT * 0.85:
-            self.get_logger().info(f"✅ Airborne {self.altitude:.1f}m → first waypoint")
+            self.get_logger().error("Takeoff timeout")
+            self._abort()
+            return
+
+        # Wait until the drone is safely airborne
+        if self.base_status == "AIRBORNE" and self.altitude >= 1.5:
+            self.get_logger().info(
+                f"✅ Airborne ({self.altitude:.1f} m) → First Waypoint"
+            )
             self._goto_next()
 
     def _goto(self):

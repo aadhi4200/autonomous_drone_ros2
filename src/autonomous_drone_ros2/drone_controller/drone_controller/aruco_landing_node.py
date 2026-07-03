@@ -3,6 +3,7 @@
 aruco_landing_node.py | Package: drone_controller
 SEARCH → ALIGN → DESCEND → LAND state machine for ArUco precision landing.
 """
+from geometry_msgs import msg
 import rclpy, math
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
@@ -131,10 +132,19 @@ class ArucoLandingNode(Node):
             self._enter(self.STATE_SEARCH)
 
     def _pub_vel(self, vx, vy, vz):
+        # msg = TwistStamped()
+        # msg.header.stamp = self.get_clock().now().to_msg()
+        # msg.header.frame_id = "map"
+        # msg.twist.linear.x=vx; msg.twist.linear.y=vy; msg.twist.linear.z=vz
+        # self.vel_pub.publish(msg)
         msg = TwistStamped()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = "map"
-        msg.twist.linear.x=vx; msg.twist.linear.y=vy; msg.twist.linear.z=vz
+
+        msg.twist.linear.x = float(vx)
+        msg.twist.linear.y = float(vy)
+        msg.twist.linear.z = float(vz)
+
         self.vel_pub.publish(msg)
 
     def _stop_vel(self): self._pub_vel(0,0,0)

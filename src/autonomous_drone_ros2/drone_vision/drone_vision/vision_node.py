@@ -23,9 +23,19 @@ class VisionNode(Node):
     def __init__(self):
         super().__init__("vision_node")
         self.bridge       = CvBridge()
-        self.aruco_dict   = aruco.getPredefinedDictionary(aruco.DICT_6X6_250)
-        self.aruco_params = aruco.DetectorParameters()
-        self.detector     = aruco.ArucoDetector(self.aruco_dict, self.aruco_params)
+        # self.aruco_dict   = aruco.getPredefinedDictionary(aruco.DICT_6X6_250)
+        # self.aruco_params = aruco.DetectorParameters()
+        # self.detector     = aruco.ArucoDetector(self.aruco_dict, self.aruco_params)
+        self.aruco_dict = aruco.getPredefinedDictionary(aruco.DICT_6X6_250)
+
+        # Compatible with OpenCV 4.5.x and newer
+        if hasattr(aruco, "ArucoDetector"):
+            self.aruco_params = aruco.DetectorParameters()
+            self.detector = aruco.ArucoDetector(self.aruco_dict, self.aruco_params)
+        else:
+            self.aruco_params = aruco.DetectorParameters_create()
+            self.detector = None
+            
         self.cx = IMAGE_W / 2.0
         self.cy = IMAGE_H / 2.0
 
