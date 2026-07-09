@@ -7,8 +7,10 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from sensor_msgs.msg import Image
+from std_msgs.msg import String
 from cv_bridge import CvBridge
 import cv2
+from drone_interfaces.constants import TOPIC_CAMERA_HEARTBEAT
 
 GAZEBO_CAM = "/world/default/model/x500_lidar_cam_down_0/link/camera_link/sensor/camera/image"
 
@@ -22,6 +24,8 @@ class CameraNode(Node):
                                 durability=DurabilityPolicy.VOLATILE, depth=10)
         self.create_subscription(Image, GAZEBO_CAM, self._image_cb, sensor_qos)
         self.image_pub = self.create_publisher(Image, "/camera/image_raw", 10)
+        self.heartbeat_pub = self.create_publisher(String, TOPIC_CAMERA_HEARTBEAT, 10)
+        self.create_timer(0.5, lambda: self.heartbeat_pub.publish(String(data="ALIVE")))
         self.get_logger().info("CameraNode started.")
 
     def _image_cb(self, msg):

@@ -3,7 +3,15 @@
 waypoint_navigator.py | Package: drone_controller
 GPS waypoint navigation with Haversine conversion.
 Commands: GOTO:A / GOTO:B / GOTO:C / GOTO:D / STOP
+
+"A" (home) is never stored as a static coordinate — it is always resolved to
+wherever /mavros/home_position/home currently says home is. That's what makes
+the SITL-home-tracks-the-operator's-actual-location fix (see 3.3 in the task
+spec) safe: there is no stale "A" entry that could point at yesterday's city.
 """
+import json
+import os
+
 import rclpy, math
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
@@ -12,14 +20,44 @@ from nav_msgs.msg import Odometry
 from std_msgs.msg import String
 from mavros_msgs.msg import HomePosition
 
+from drone_interfaces.geo import gps_to_local
+from drone_interfaces.constants import TOPIC_MISSION_WAYPOINTS, RTH_ALTITUDE
+
 WP_TOLERANCE = 0.4
 WP_TIMEOUT   = 60.0
 CRUISE_ALT   = 5.0
 SETPOINT_HZ  = 20.0
 
+# Standalone-testing default stops, relative to wherever home turns out to be
+# (metres north/east of home) — mirrors the static Gazebo world's original
+# 10m/20m/30m-north pad layout. Only used until the frontend uploads real
+# waypoints; never a hardcoded absolute GPS literal.
+DEFAULT_RELATIVE_STOPS = {
+    "B": (10.0, 0.0),
+    "C": (20.0, 0.0),
+    "D": (30.0, 0.0),
+}
+
+LAST_SYNCED_HOME_FILE = os.path.expanduser("~/drone_ws2/.last_synced_home")
+
+
 class Waypoint:
-    def __init__(self, lat, lon, alt=CRUISE_ALT, label="WP"):
-        self.lat=lat; self.lon=lon; self.alt=alt; self.label=label
+    def __init__(self, lat, lon, alt=CRUISE_ALT, label="WP", marker_id=None):
+        self.lat = lat; self.lon = lon; self.alt = alt
+        self.label = label; self.marker_id = marker_id
+
+
+def _read_fallback_home():
+    """Best-effort default for the home_lat/home_lon ROS params, read once at
+    startup from whatever /system/set-home last persisted. This is only ever
+    used before the real /mavros/home_position/home arrives."""
+    try:
+        with open(LAST_SYNCED_HOME_FILE) as f:
+            lat_str, lon_str = f.read().strip().split(",")
+            return float(lat_str), float(lon_str)
+    except Exception:
+        return 0.0, 0.0
+
 
 class WaypointNavigator(Node):
     NAV_IDLE       = "IDLE"
@@ -29,60 +67,35 @@ class WaypointNavigator(Node):
 
     def __init__(self):
         super().__init__("waypoint_navigator")
+
+        fallback_lat, fallback_lon = _read_fallback_home()
+        self.declare_parameter("home_lat", fallback_lat)
+        self.declare_parameter("home_lon", fallback_lon)
+
         sensor_qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
                                 durability=DurabilityPolicy.VOLATILE, depth=10)
         self.create_subscription(Odometry,     "/mavros/local_position/odom", self._odom_cb, sensor_qos)
         self.create_subscription(HomePosition, "/mavros/home_position/home",  self._home_cb, sensor_qos)
         self.create_subscription(String,       "/waypoint_nav/command",       self._cmd_cb,  10)
+        self.create_subscription(String,       TOPIC_MISSION_WAYPOINTS,       self._waypoints_cb, 10)
 
         self.setpoint_pub = self.create_publisher(PoseStamped, "/mavros/setpoint_position/local", 10)
         self.status_pub   = self.create_publisher(String,      "/waypoint_nav/status", 10)
 
-        # ── Edit GPS waypoints here ──────────────────────
-        self.waypoints = {
-            "A": Waypoint(10.850500, 76.271000, label="HOME"),
-            "B": Waypoint(10.850600, 76.271200, label="POINT_B"),
-            "C": Waypoint(10.850700, 76.271400, label="POINT_C"),
-            "D": Waypoint(10.850800, 76.271600, label="POINT_D"),
-        }
+        # B/C/D (and beyond) only — "A"/home is resolved live, never stored here.
+        self.waypoints = {}
+        self.uploaded  = False
 
-        # ====================================================================================================
-        
-        # self.create_subscription(
-        #     String, "/mission/waypoints",
-        #     self._waypoints_cb, 10)
-
-        # # Add this callback
-        # def _waypoints_cb(self, msg: String):
-        #     """Receive GPS waypoints from frontend via MissionManager."""
-        #     import json
-        #     data = json.loads(msg.data)
-
-        #     # Always add home as A
-        #     if self.home_lat is not None:
-        #         self.waypoints["A"] = Waypoint(
-        #             self.home_lat, self.home_lon, label="HOME")
-
-        #     # Add frontend waypoints as B, C, D...
-        #     for wp in data:
-        #         key = wp.get("label", "B")
-        #         self.waypoints[key] = Waypoint(
-        #             lat   = wp["lat"],
-        #             lon   = wp["lon"],
-        #             alt   = wp.get("alt", 5.0),
-        #             label = wp.get("label", key)
-        #         )
-        #         self.get_logger().info(
-        #             f"Waypoint added: {key} → "
-        #             f"({wp['lat']:.6f}, {wp['lon']:.6f})")
-
-
-        #========================================================================================================
-
-
+        param_lat = self.get_parameter("home_lat").value
+        param_lon = self.get_parameter("home_lon").value
+        self.home_lat, self.home_lon = param_lat, param_lon
+        self.home_is_real = False
+        if (param_lat, param_lon) == (0.0, 0.0):
+            self.get_logger().warn(
+                "No home ever synced (no /system/set-home + no persisted fallback) — "
+                "using (0.0, 0.0) as a placeholder home until /mavros/home_position/home arrives.")
 
         self.current_pos     = None
-        self.home_lat = self.home_lon = None
         self.nav_state       = self.NAV_IDLE
         self.active_wp       = None
         self.active_wp_local = None
@@ -97,10 +110,44 @@ class WaypointNavigator(Node):
         self.current_pos = (p.x, p.y, p.z)
 
     def _home_cb(self, msg):
-        if self.home_lat is None:
+        if not self.home_is_real:
             self.home_lat = msg.geo.latitude
             self.home_lon = msg.geo.longitude
-            self.get_logger().info(f"Home GPS: ({self.home_lat:.6f},{self.home_lon:.6f})")
+            self.home_is_real = True
+            self.get_logger().info(f"Home GPS (real, from MAVROS): ({self.home_lat:.6f},{self.home_lon:.6f})")
+            self._seed_default_stops_if_needed()
+
+    def _seed_default_stops_if_needed(self):
+        """Fill in B/C/D relative to home for standalone testing, only if the
+        frontend hasn't uploaded a real mission yet."""
+        if self.uploaded or self.waypoints:
+            return
+        for label, (north_m, east_m) in DEFAULT_RELATIVE_STOPS.items():
+            dlat = math.degrees(north_m / 6371000)
+            dlon = math.degrees(east_m / (6371000 * math.cos(math.radians(self.home_lat))))
+            self.waypoints[label] = Waypoint(
+                self.home_lat + dlat, self.home_lon + dlon, label=f"DEFAULT_{label}")
+        self.get_logger().info("Seeded default B/C/D stops relative to home (no mission uploaded yet).")
+
+    def _waypoints_cb(self, msg: String):
+        """Receive GPS waypoints uploaded from the website (frontend -> backend
+        -> /mission/waypoints), replacing any default/previous stops."""
+        try:
+            data = json.loads(msg.data)
+        except Exception as e:
+            self.get_logger().error(f"Bad /mission/waypoints payload: {e}")
+            return
+
+        self.waypoints = {}
+        for wp in data:
+            key = wp.get("label", "B")
+            self.waypoints[key] = Waypoint(
+                lat=wp["lat"], lon=wp["lon"], alt=wp.get("alt", CRUISE_ALT),
+                label=wp.get("label", key), marker_id=wp.get("marker_id"))
+            self.get_logger().info(
+                f"Waypoint added: {key} → ({wp['lat']:.6f}, {wp['lon']:.6f}) "
+                f"alt={wp.get('alt', CRUISE_ALT)} marker_id={wp.get('marker_id')}")
+        self.uploaded = True
 
     def _cmd_cb(self, msg):
         cmd = msg.data.strip().upper()
@@ -108,14 +155,18 @@ class WaypointNavigator(Node):
         elif cmd == "STOP": self.nav_state = self.NAV_IDLE
 
     def _start_nav(self, key):
-        if self.home_lat is None:
-            self.get_logger().error("Home GPS not locked!"); return
-        if key not in self.waypoints:
-            self.get_logger().error(f"Unknown WP: {key}"); return
-        self.active_wp = self.waypoints[key]
-        north, east = self._gps_to_local(self.home_lat, self.home_lon,
-                                          self.active_wp.lat, self.active_wp.lon)
-        self.active_wp_local = (east, north, self.active_wp.alt)
+        if not self.home_is_real:
+            self.get_logger().warn("Home GPS not yet confirmed by MAVROS — using unsynced fallback home!")
+        if key == "A":
+            self.active_wp = Waypoint(self.home_lat, self.home_lon, alt=RTH_ALTITUDE, label="HOME")
+            self.active_wp_local = (0.0, 0.0, RTH_ALTITUDE)
+        else:
+            if key not in self.waypoints:
+                self.get_logger().error(f"Unknown WP: {key}"); return
+            self.active_wp = self.waypoints[key]
+            north, east = gps_to_local(self.home_lat, self.home_lon,
+                                        self.active_wp.lat, self.active_wp.lon)
+            self.active_wp_local = (east, north, self.active_wp.alt)
         self.state_start = self.get_clock().now()
         self.nav_state = self.NAV_NAVIGATING
         self.get_logger().info(f"Navigating → {self.active_wp.label}")
@@ -136,12 +187,6 @@ class WaypointNavigator(Node):
                 self.nav_state = self.NAV_ARRIVED; self._pub_status()
         elif self.nav_state == self.NAV_ARRIVED:
             self._pub_setpoint(wp_x, wp_y, wp_z)
-
-    def _gps_to_local(self, hlat, hlon, tlat, tlon):
-        R = 6371000
-        north = math.radians(tlat-hlat)*R
-        east  = math.radians(tlon-hlon)*R*math.cos(math.radians(hlat))
-        return north, east
 
     def _dist(self, tx, ty, tz):
         if self.current_pos is None: return float("inf")

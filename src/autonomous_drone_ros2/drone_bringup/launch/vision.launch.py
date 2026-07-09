@@ -1,9 +1,51 @@
-"""vision.launch.py — camera bridge + ArUco vision only"""
+"""vision.launch.py — camera bridge + ArUco vision, sim/hardware aware.
+
+`mode:=sim` (default) starts the Gazebo->ROS2 camera bridge (the manual
+Terminal-3 `ros_gz_bridge parameter_bridge` step from the README) plus
+camera_node + vision_node.
+
+`mode:=hardware` skips the Gazebo bridge and expects a real camera driver
+node to already be publishing /camera/image_raw (e.g. an IMX219/OAK-D Lite
+node, per the project's Phase 3/4 hardware plan) — that driver does not
+exist in this repo yet, so this just logs what's missing rather than
+launching a fake stand-in.
+"""
 from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, LogInfo
+from launch.conditions import IfCondition
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 
+GAZEBO_CAM_TOPIC = "/world/default/model/x500_lidar_cam_down_0/link/camera_link/sensor/camera/image"
+
+
 def generate_launch_description():
+    mode = LaunchConfiguration('mode')
+    is_sim = PythonExpression(["'", mode, "' == 'sim'"])
+    is_hardware = PythonExpression(["'", mode, "' == 'hardware'"])
+
     return LaunchDescription([
-        Node(package='drone_camera', executable='camera_node', name='camera_node', output='screen'),
+        DeclareLaunchArgument('mode', default_value='sim',
+                               description="'sim' (Gazebo camera bridge) or 'hardware' (real camera driver)"),
+
+        ExecuteProcess(
+            condition=IfCondition(is_sim),
+            cmd=['ros2', 'run', 'ros_gz_bridge', 'parameter_bridge',
+                 f'{GAZEBO_CAM_TOPIC}@sensor_msgs/msg/Image@gz.msgs.Image'],
+            output='screen',
+        ),
+        # camera_node just republishes the Gazebo-bridged topic onto
+        # /camera/image_raw — sim-only. On real hardware the camera driver
+        # node publishes /camera/image_raw itself, so camera_node has
+        # nothing to do there.
+        Node(package='drone_camera', executable='camera_node', name='camera_node',
+             output='screen', condition=IfCondition(is_sim)),
+        # vision_node is source-agnostic — runs in both modes unchanged.
         Node(package='drone_vision', executable='vision_node', name='vision_node', output='screen'),
+
+        LogInfo(
+            condition=IfCondition(is_hardware),
+            msg="mode=hardware: no Gazebo bridge started. A real camera driver node "
+                "must publish /camera/image_raw itself (not yet implemented in this repo — "
+                "wire your IMX219/OAK-D driver here)."),
     ])

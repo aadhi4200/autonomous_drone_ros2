@@ -2,28 +2,36 @@
 """
 generate_aruco.py
 Generates ArUco ID=17 PNG texture for Gazebo model.
-Run once before launching SITL:
+Run once before launching SITL (after the workspace has been built/sourced):
   python3 scripts/generate_aruco.py
 """
-import cv2, cv2.aruco as aruco, os, shutil
+import os
+import sys
 
-MARKER_ID   = 17
-MARKER_SIZE = 1000
-BORDER_PX   = 100
+_repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(
+    _repo_root, "src", "autonomous_drone_ros2", "drone_interfaces"))
+
+try:
+    from drone_interfaces.aruco_marker import generate_marker_png
+except ImportError as e:
+    raise SystemExit(
+        "Could not import drone_interfaces.aruco_marker — build the workspace "
+        "first (colcon build) or run from the repo root.") from e
+
+import shutil
+
+MARKER_ID = 17
+
 
 def main():
-    script_dir  = os.path.dirname(os.path.abspath(__file__))
-    repo_root   = os.path.dirname(script_dir)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.dirname(script_dir)
     texture_dir = os.path.join(repo_root, "simulation", "gazebo", "models",
-                               "aruco_17", "materials", "textures")
+                                "aruco_17", "materials", "textures")
     output_path = os.path.join(texture_dir, "aruco_17.png")
-    os.makedirs(texture_dir, exist_ok=True)
 
-    aruco_dict = aruco.getPredefinedDictionary(aruco.DICT_6X6_250)
-    marker     = aruco.generateImageMarker(aruco_dict, MARKER_ID, MARKER_SIZE)
-    bordered   = cv2.copyMakeBorder(marker, BORDER_PX, BORDER_PX, BORDER_PX, BORDER_PX,
-                                    cv2.BORDER_CONSTANT, value=255)
-    cv2.imwrite(output_path, bordered)
+    generate_marker_png(MARKER_ID, output_path)
     print(f"✅ ArUco ID={MARKER_ID} saved: {output_path}")
 
     px4_dir = os.path.expanduser(
@@ -33,4 +41,6 @@ def main():
         shutil.copy2(output_path, os.path.join(px4_dir, "aruco_17.png"))
         print(f"✅ Copied to PX4: {px4_dir}")
 
-if __name__ == "__main__": main()
+
+if __name__ == "__main__":
+    main()

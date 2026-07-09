@@ -2,7 +2,13 @@
 """
 mission_manager.py | Package: drone_mission
 Full mission orchestration: A → B → C → D → Return to A
+
+Mission sequence and per-stop marker IDs come from whatever the frontend
+uploaded on /mission/waypoints (order = array order sent by the website);
+falls back to the original A->B->C->D default only if nothing was uploaded.
 """
+import json
+
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
@@ -10,12 +16,20 @@ from std_msgs.msg import String
 from mavros_msgs.srv import SetMode
 from nav_msgs.msg import Odometry
 
+from drone_interfaces.constants import TOPIC_MISSION_WAYPOINTS, ARUCO_MARKER_ID
+
 TAKEOFF_ALT     = 5.0
 WAIT_ON_GROUND  = 5.0
 ARM_TIMEOUT     = 10.0
 TAKEOFF_TIMEOUT = 20.0
 NAV_TIMEOUT     = 60.0
 LAND_TIMEOUT    = 30.0
+
+DEFAULT_SEQUENCE = [
+    ("B", "DELIVERY_B"),
+    ("C", "DELIVERY_C"),
+    ("D", "DELIVERY_D"),
+]
 
 class MS:
     IDLE           = "IDLE"
@@ -34,16 +48,14 @@ class MissionManager(Node):
     def __init__(self):
         super().__init__("mission_manager")
 
-        # ── Mission sequence — edit to add/remove waypoints ──
-        self.mission_sequence = [
-            ("B", "DELIVERY_B"),
-            ("C", "DELIVERY_C"),
-            ("D", "DELIVERY_D"),
-        ]
+        self.mission_sequence = list(DEFAULT_SEQUENCE)
+        self.marker_ids  = {}   # label -> marker_id, from the frontend upload
+        self.uploaded    = False
         self.wp_index    = 0
         self.state       = MS.IDLE
         self.state_start = None
         self.wait_start  = None
+        self.rth_reason  = None   # set when RETURN_HOME was entered due to a failsafe RTH, not mission end
 
         sensor_qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
                                 durability=DurabilityPolicy.VOLATILE, depth=10)
@@ -53,6 +65,7 @@ class MissionManager(Node):
         self.create_subscription(String,   "/aruco_landing/status", self._aruco_cb,   10)
         self.create_subscription(Odometry, "/mavros/local_position/odom", self._odom_cb, sensor_qos)
         self.create_subscription(String,   "/mission/command",      self._mission_cmd, 10)
+        self.create_subscription(String,   TOPIC_MISSION_WAYPOINTS, self._waypoints_cb, 10)
 
         self.base_cmd_pub  = self.create_publisher(String, "/drone_base/command",    10)
         self.nav_cmd_pub   = self.create_publisher(String, "/waypoint_nav/command",  10)
@@ -68,12 +81,27 @@ class MissionManager(Node):
 
         self.create_timer(0.2, self._loop)
         self.create_timer(1.0, self._log)
+        # Periodic heartbeat re-publish (not just on state change) so a
+        # frozen/crashed mission_manager is distinguishable from one that
+        # simply has nothing new to report (see connectivity-gate feature).
+        self.create_timer(0.5, lambda: self.status_pub.publish(String(data=self.state)))
         self.get_logger().info("MissionManager ready. Publish 'START' to /mission/command")
 
     def _base_cb(self,  msg): self.base_status  = msg.data
     def _nav_cb(self,   msg): self.nav_status   = msg.data
     def _aruco_cb(self, msg): self.aruco_status = msg.data
     def _odom_cb(self,  msg): self.altitude     = msg.pose.pose.position.z
+
+    def _waypoints_cb(self, msg):
+        try:
+            data = json.loads(msg.data)
+        except Exception as e:
+            self.get_logger().error(f"Bad /mission/waypoints payload: {e}")
+            return
+        self.mission_sequence = [(wp.get("label", "B"), f"DELIVERY_{wp.get('label','B')}") for wp in data]
+        self.marker_ids = {wp.get("label", "B"): wp.get("marker_id") for wp in data}
+        self.uploaded = True
+        self.get_logger().info(f"Mission sequence from upload: {[k for k,_ in self.mission_sequence]}")
 
     def _mission_cmd(self, msg):
         cmd = msg.data.strip().upper()
@@ -82,6 +110,11 @@ class MissionManager(Node):
             self._enter(MS.PREFLIGHT)
         elif cmd == "ABORT":
             self._abort()
+        elif cmd.startswith("RTH:"):
+            # Failsafe-triggered return-to-home (comms/node loss) — distinct
+            # from a manual/battery ABORT, which lands in place instead.
+            reason = cmd.split(":", 1)[1]
+            self._trigger_rth(reason)
 
     def _loop(self):
         if   self.state == MS.IDLE:          return
@@ -103,19 +136,11 @@ class MissionManager(Node):
         self._send_base("TAKEOFF")
         self._enter(MS.TAKEOFF)
 
-    # def _takeoff(self):
-    #     if self._elapsed() > TAKEOFF_TIMEOUT:
-    #         self._abort(); return
-    #     if self.base_status == "AIRBORNE" and self.altitude >= TAKEOFF_ALT * 0.85:
-    #         self.get_logger().info(f"✅ Airborne {self.altitude:.1f}m → first waypoint")
-    #         self._goto_next()
     def _takeoff(self):
         if self._elapsed() > TAKEOFF_TIMEOUT:
             self.get_logger().error("Takeoff timeout")
             self._abort()
             return
-
-        # Wait until the drone is safely airborne
         if self.base_status == "AIRBORNE" and self.altitude >= 1.5:
             self.get_logger().info(
                 f"✅ Airborne ({self.altitude:.1f} m) → First Waypoint"
@@ -126,10 +151,11 @@ class MissionManager(Node):
         if self._elapsed() > NAV_TIMEOUT:
             self._abort(); return
         if self.nav_status == "ARRIVED":
-            _,label = self.mission_sequence[self.wp_index]
+            key, label = self.mission_sequence[self.wp_index]
             self.get_logger().info(f"✅ Arrived {label} → ArUco landing")
             self._send_nav("STOP")
-            self._send_aruco("START")
+            marker_id = self.marker_ids.get(key) or ARUCO_MARKER_ID
+            self._send_aruco(f"START:{marker_id}")
             self._enter(MS.ARUCO_LAND)
         elif self.nav_status == "TIMEOUT":
             self._goto_next()
@@ -165,6 +191,7 @@ class MissionManager(Node):
                 self._goto_next()
             else:
                 self.get_logger().info("🏠 All deliveries done → Return Home")
+                self.rth_reason = None
                 self._send_nav("GOTO:A")
                 self._enter(MS.RETURN_HOME)
 
@@ -181,7 +208,10 @@ class MissionManager(Node):
         if self._elapsed() > LAND_TIMEOUT:
             self._abort(); return
         if self.base_status == "LANDED":
-            self.get_logger().info("🏁 Mission complete!")
+            if self.rth_reason:
+                self.get_logger().info(f"🏁 Failsafe RTH complete (reason={self.rth_reason})")
+            else:
+                self.get_logger().info("🏁 Mission complete!")
             self._enter(MS.COMPLETE)
 
     def _goto_next(self):
@@ -194,8 +224,22 @@ class MissionManager(Node):
         req = SetMode.Request(); req.custom_mode = "AUTO.LAND"
         self.set_mode_client.call_async(req)
 
+    def _trigger_rth(self, reason: str):
+        """Return-to-home-and-land, for connectivity-loss failsafes. Distinct
+        from _abort(): this flies home first instead of landing in place."""
+        if self.state in (MS.IDLE, MS.COMPLETE, MS.ABORT, MS.RETURN_HOME, MS.HOME_LAND):
+            return
+        self.get_logger().error(f"🛑 FAILSAFE RTH triggered (reason={reason})")
+        self.rth_reason = reason
+        self._send_aruco("ABORT")
+        self._send_nav("GOTO:A")
+        self._enter(MS.RETURN_HOME)
+
     def _abort(self):
-        self.get_logger().error("🛑 ABORT")
+        """Immediate in-place land — for explicit operator abort, timeouts,
+        and low-battery emergencies where flying further/home is itself
+        unsafe. Comms/node-loss uses _trigger_rth() instead."""
+        self.get_logger().error("🛑 ABORT (in-place land)")
         self._send_aruco("ABORT")
         self._send_nav("STOP")
         self._auto_land()

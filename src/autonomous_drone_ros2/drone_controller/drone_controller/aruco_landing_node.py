@@ -9,7 +9,8 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from geometry_msgs.msg import PoseStamped, TwistStamped, PointStamped
 from nav_msgs.msg import Odometry
-from std_msgs.msg import String
+from std_msgs.msg import String, Int32
+from drone_interfaces.constants import ARUCO_MARKER_ID, TOPIC_VISION_TARGET_ID
 
 SEARCH_YAW_RATE  = 0.3
 ALIGN_THRESHOLD  = 20.0
@@ -42,6 +43,7 @@ class ArucoLandingNode(Node):
         self.vel_pub      = self.create_publisher(TwistStamped, "/mavros/setpoint_velocity/cmd_vel_unstamped", 10)
         self.setpoint_pub = self.create_publisher(PoseStamped,  "/mavros/setpoint_position/local", 10)
         self.status_pub   = self.create_publisher(String,       "/aruco_landing/status", 10)
+        self.target_id_pub = self.create_publisher(Int32,       TOPIC_VISION_TARGET_ID, 10)
 
         self.current_pos      = None
         self.current_yaw      = 0.0
@@ -52,6 +54,7 @@ class ArucoLandingNode(Node):
         self.state_start      = None
         self.last_detection   = None
         self.search_yaw       = 0.0
+        self.expected_marker_id = ARUCO_MARKER_ID
 
         self.create_timer(1.0/20.0, self._loop)
         self.create_timer(0.5,      self._pub_status)
@@ -71,7 +74,12 @@ class ArucoLandingNode(Node):
 
     def _cmd_cb(self, msg):
         cmd = msg.data.strip().upper()
-        if cmd == "START": self._enter(self.STATE_SEARCH)
+        if cmd == "START" or cmd.startswith("START:"):
+            parts = cmd.split(":")
+            self.expected_marker_id = int(parts[1]) if len(parts) > 1 else ARUCO_MARKER_ID
+            self.target_id_pub.publish(Int32(data=self.expected_marker_id))
+            self.get_logger().info(f"Expecting marker ID={self.expected_marker_id} at this stop")
+            self._enter(self.STATE_SEARCH)
         elif cmd == "ABORT": self._enter(self.STATE_IDLE); self._stop_vel()
 
     def _loop(self):

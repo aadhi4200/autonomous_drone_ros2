@@ -10,5 +10,8 @@ setup(
     ],
     install_requires=['setuptools'],
     zip_safe=True,
-    entry_points={'console_scripts': ['mission_manager = drone_mission.mission_manager:main']},
+    entry_points={'console_scripts': [
+        'mission_manager = drone_mission.mission_manager:main',
+        'failsafe_monitor = drone_mission.failsafe_monitor:main',
+    ]},
 )
