@@ -37,6 +37,12 @@ GZ_MODEL="${GZ_MODEL:-gz_x500_lidar_cam_down}"
 GZ_WORLD="${GZ_WORLD:-aruco_landing}"
 CAMERA_MODEL_NAME="${CAMERA_MODEL_NAME:-x500_lidar_cam_down_0}"
 FCU_URL="${FCU_URL:-udp://:14540@127.0.0.1:14580}"
+# Written by the website (POST /system/set-home) whenever the operator's
+# browser syncs its laptop geolocation. Spawning SITL's home anywhere else
+# guarantees the backend's home_position_match gate fails permanently, since
+# it compares PX4's actual home against this exact file.
+SYNCED_HOME_FILE="${SYNCED_HOME_FILE:-$HOME/drone_ws2/.last_synced_home}"
+PX4_HOME_ALT_DEFAULT="${PX4_HOME_ALT_DEFAULT:-0}"
 # If the GUI shows a black/broken viewport (known issue on weaker/older GPUs
 # like the MX250), export this before running: PX4_GZ_SIM_RENDER_ENGINE=ogre
 PX4_GZ_SIM_RENDER_ENGINE="${PX4_GZ_SIM_RENDER_ENGINE:-}"
@@ -109,11 +115,25 @@ wait_for_topic() {
 
 # ── Stage 1 — PX4 SITL + Gazebo ───────────────────────────────────────────
 echo "── Stage 1/5: PX4 SITL + Gazebo ──"
+if [ -f "$SYNCED_HOME_FILE" ]; then
+  SYNCED_HOME_RAW="$(cat "$SYNCED_HOME_FILE")"
+  PX4_HOME_LAT="${SYNCED_HOME_RAW%%,*}"
+  PX4_HOME_LON="${SYNCED_HOME_RAW##*,}"
+  PX4_HOME_ALT="$PX4_HOME_ALT_DEFAULT"
+  echo "ℹ️  Spawning SITL home at synced location $PX4_HOME_LAT,$PX4_HOME_LON (from $SYNCED_HOME_FILE)"
+else
+  echo "⚠️  No synced home file at $SYNCED_HOME_FILE yet — SITL will spawn at the"
+  echo "   world's default origin, and the website's home_position_match gate"
+  echo "   will stay red until you sync location from the website and rerun."
+fi
 (
   cd "$PX4_DIR" || exit 1
   export PX4_GZ_WORLD="$GZ_WORLD"
   export HEADLESS="$HEADLESS"
   [ -n "$PX4_GZ_SIM_RENDER_ENGINE" ] && export PX4_GZ_SIM_RENDER_ENGINE
+  if [ -n "${PX4_HOME_LAT:-}" ]; then
+    export PX4_HOME_LAT PX4_HOME_LON PX4_HOME_ALT
+  fi
   make px4_sitl "$GZ_MODEL"
 ) < /dev/null > "$LOG_DIR/01_px4_sitl.log" 2>&1 &
 # `< /dev/null` matters: PX4's interactive pxh> shell, backgrounded with no
@@ -128,7 +148,12 @@ wait_for_log "$LOG_DIR/01_px4_sitl.log" "Startup script returned successfully" 9
 
 # ── Stage 2 — MAVROS ───────────────────────────────────────────────────────
 echo "── Stage 2/5: MAVROS ──"
+# ROS2's setup.bash references variables (e.g. AMENT_TRACE_SETUP_FILES) it
+# never guarantees are set, which trips `set -u` above and kills this whole
+# script the instant it's sourced. Relax -u only around the source itself.
+set +u
 source /opt/ros/humble/setup.bash
+set -u
 (
   ros2 launch mavros px4.launch fcu_url:="$FCU_URL"
 ) > "$LOG_DIR/02_mavros.log" 2>&1 &
@@ -147,7 +172,9 @@ wait_for_topic "$CAMERA_TOPIC" 30 "camera image"
 
 # ── Stage 4 — All mission nodes ───────────────────────────────────────────
 echo "── Stage 4/5: Mission nodes (drone_bringup) ──"
+set +u
 source "$DRONE_WS/install/setup.bash"
+set -u
 (
   ros2 launch drone_bringup full_mission.launch.py
 ) > "$LOG_DIR/04_full_mission.log" 2>&1 &
@@ -178,7 +205,7 @@ fi
 # ── Optional: publish START via CLI (only for testing without the website) ─
 if [ "$CLI_START" -eq 1 ]; then
   echo "── CLI START requested (--cli-start) ──"
-  source "$DRONE_WS/install/setup.bash" 2>/dev/null || true
+  set +u; source "$DRONE_WS/install/setup.bash" 2>/dev/null || true; set -u
   ros2 topic pub /mission/command std_msgs/msg/String "data: 'START'" --once
   echo "🚀 Mission started via CLI."
 fi

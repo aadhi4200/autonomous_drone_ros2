@@ -371,6 +371,16 @@ ros2 topic pub /mission/command std_msgs/msg/String "data: 'START'" --once
 
 ---
 
+cd ~/drone_ws2/src/frontend_bridge/backend
+python3 main.py
+
+cd ~/drone_ws2/src/frontend_bridge   # or wherever the frontend repo is
+npm run dev
+
+pkill -9 -f px4
+pkill -9 -f 'gz sim'
+pkill -9 -f gzserver
+
 ## License
 
 
