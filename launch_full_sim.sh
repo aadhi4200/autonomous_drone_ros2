@@ -33,8 +33,29 @@ PX4_DIR="${PX4_DIR:-$HOME/PX4-Autopilot}"
 DRONE_WS="${DRONE_WS:-$HOME/drone_ws2}"
 BACKEND_DIR="${BACKEND_DIR:-$HOME/drone_ws2/src/frontend_bridge/backend}"
 LOG_DIR="${LOG_DIR:-$HOME/drone_ws2/logs/$(date +%Y%m%d_%H%M%S)}"
-GZ_MODEL="${GZ_MODEL:-gz_x500_lidar_cam_down}"
+# Airframe ID for this project's vehicle (ROMFS/px4fmu_common/init.d-posix/
+# airframes/4018_gz_x500_lidar_cam_down) — replaces the old GZ_MODEL/
+# `make px4_sitl gz_<model>` target name, which no longer exists on PX4
+# v1.18.0-alpha1+ (verified 2026-07-10: that command fails immediately with
+# `ninja: error: unknown target`, on this exact checkout, freshly cloned,
+# never pulled since — this was never actually working here, not a
+# regression from something that changed after this script was written).
+PX4_SYS_AUTOSTART="${PX4_SYS_AUTOSTART:-4018}"
+# Base Gazebo model/world assets (ground plane, sun, x500 vehicle family).
+# Defaults to a pre-populated PX4-gazebo-models clone if present, else the
+# stock simulation-gazebo script's own auto-download location.
+GZ_MODEL_STORE="${GZ_MODEL_STORE:-$([ -d "$HOME/PX4-gazebo-models" ] && echo "$HOME/PX4-gazebo-models" || echo "$HOME/.simulation-gazebo")}"
+# This project's own world/models (aruco_landing.sdf, aruco_<id> markers
+# Feature 1 spawns at runtime) — merged onto GZ_SIM_RESOURCE_PATH alongside
+# GZ_MODEL_STORE below, not copied into it.
+PROJECT_SIM_DIR="$DRONE_WS/src/autonomous_drone_ros2/simulation/gazebo"
 GZ_WORLD="${GZ_WORLD:-aruco_landing}"
+# NOTE (found 2026-07-10, not yet fixed — separate from the boot-mechanism
+# fix above): the actual spawned vehicle model name under PX4_SYS_AUTOSTART
+# is "x500_0", not "x500_lidar_cam_down_0" — confirmed via a live boot's own
+# gz_bridge log ("world: aruco_landing, model: x500_0"). CAMERA_TOPIC below
+# is very likely wrong as a result and the camera bridge in stage 3 may not
+# actually find its topic. Verify before relying on the camera feed.
 CAMERA_MODEL_NAME="${CAMERA_MODEL_NAME:-x500_lidar_cam_down_0}"
 FCU_URL="${FCU_URL:-udp://:14540@127.0.0.1:14580}"
 # Written by the website (POST /system/set-home) whenever the operator's
@@ -126,25 +147,43 @@ else
   echo "   world's default origin, and the website's home_position_match gate"
   echo "   will stay red until you sync location from the website and rerun."
 fi
+# Build once (safe to rerun — ninja no-ops if already built).
+echo "ℹ️  Ensuring px4_sitl_default is built (first run only, ~10-20min)..."
+(cd "$PX4_DIR" && make px4_sitl_default) > "$LOG_DIR/01a_px4_build.log" 2>&1
+if [ $? -ne 0 ]; then
+  echo "❌ px4_sitl_default build failed. See $LOG_DIR/01a_px4_build.log"
+  exit 1
+fi
+
+# Gazebo, as its own process — PX4 waits for it internally ("Waiting for
+# Gazebo world..." / "Gazebo world is ready" in its own log), so no separate
+# readiness wait is needed here; the PX4 wait_for_log below covers it.
 (
-  cd "$PX4_DIR" || exit 1
-  export PX4_GZ_WORLD="$GZ_WORLD"
-  export HEADLESS="$HEADLESS"
+  export GZ_SIM_RESOURCE_PATH="$GZ_MODEL_STORE/models:$PROJECT_SIM_DIR/models"
+  export GZ_SIM_SERVER_CONFIG_PATH="$GZ_MODEL_STORE/server.config"
   [ -n "$PX4_GZ_SIM_RENDER_ENGINE" ] && export PX4_GZ_SIM_RENDER_ENGINE
+  GZ_ARGS=(-r "$PROJECT_SIM_DIR/worlds/$GZ_WORLD.sdf")
+  [ "$HEADLESS" -eq 1 ] && GZ_ARGS+=(-s)
+  gz sim "${GZ_ARGS[@]}"
+) > "$LOG_DIR/01b_gazebo.log" 2>&1 &
+PIDS+=("$!")
+
+# PX4 SITL, connecting to the Gazebo process above. `-d` (daemon mode,
+# "don't start pxh shell") is the actual fix for the pxh> shell's stdin-EOF
+# busy-loop — confirmed live: `< /dev/null` alone did NOT stop it when
+# tested against the raw binary (filled a log to 800+MB in under a minute).
+# Both are kept together for safety.
+(
+  cd "$PX4_DIR/build/px4_sitl_default/rootfs" || exit 1
+  export PX4_SYS_AUTOSTART
+  export PX4_GZ_WORLD="$GZ_WORLD"
   if [ -n "${PX4_HOME_LAT:-}" ]; then
     export PX4_HOME_LAT PX4_HOME_LON PX4_HOME_ALT
   fi
-  make px4_sitl "$GZ_MODEL"
-) < /dev/null > "$LOG_DIR/01_px4_sitl.log" 2>&1 &
-# `< /dev/null` matters: PX4's interactive pxh> shell, backgrounded with no
-# real TTY on stdin, spins in a tight prompt-redraw loop (`pxh> ` + ANSI
-# clear-line) instead of ever blocking/exiting — which both fills the log
-# file at gigabytes/minute and leaves the process alive forever, so every
-# later launch attempt hits "PX4 server already running for instance 0"
-# against that same stuck process. Piping from /dev/null makes it treat
-# stdin as closed/non-interactive instead of spinning.
+  "$PX4_DIR/build/px4_sitl_default/bin/px4" -d
+) < /dev/null > "$LOG_DIR/01c_px4_sitl.log" 2>&1 &
 PIDS+=("$!")
-wait_for_log "$LOG_DIR/01_px4_sitl.log" "Startup script returned successfully" 90 "PX4 SITL"
+wait_for_log "$LOG_DIR/01c_px4_sitl.log" "Startup script returned successfully" 90 "PX4 SITL"
 
 # ── Stage 2 — MAVROS ───────────────────────────────────────────────────────
 echo "── Stage 2/5: MAVROS ──"

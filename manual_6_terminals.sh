@@ -11,31 +11,55 @@
 # update these two values (or `cat ~/drone_ws2/.last_synced_home`) before
 # Terminal 1 if you've synced since. Syncing AFTER Terminal 1 is already
 # running has no effect until PX4 is restarted with the new values.
+#
+# Corrected 2026-07-10: `make px4_sitl gz_<model>` (Terminal 1 below, old
+# version) does NOT work on this PX4 checkout (v1.18.0-alpha1+) — the
+# per-model ninja target it needs was removed upstream. This was verified
+# broken repeatedly, not a fluke. Terminal 1 is now the two-process
+# replacement, verified working end-to-end (including markers) against the
+# real aruco_landing world. Terminal 3's camera bridge topic was ALSO wrong
+# (camera lives in a nested "mono_cam" sub-model, not directly on
+# camera_link) — but even with a corrected path, the camera sensor doesn't
+# publish at all in this environment (likely a WSL GPU/offscreen-rendering
+# limitation) — deprioritized, not fixed. Terminals 2/4/5/6 are unchanged
+# and confirmed working, including all running together simultaneously.
 
-# ── Terminal 1 — PX4 SITL ──────────────────────────────────────────────────
-cd ~/PX4-Autopilot
+# ── Terminal 1 — PX4 SITL + Gazebo, as two processes ───────────────────────
+# Build once (safe to rerun elsewhere, no-op if already built):
+#   cd ~/PX4-Autopilot && make px4_sitl_default
+#
+# Terminal 1a — Gazebo:
+export GZ_SIM_RESOURCE_PATH=~/PX4-gazebo-models/models:~/drone_ws2/src/autonomous_drone_ros2/simulation/gazebo/models:~/PX4-Autopilot/Tools/simulation/gz/models
+export GZ_SIM_SERVER_CONFIG_PATH=~/PX4-gazebo-models/server.config
+gz sim -r ~/drone_ws2/src/autonomous_drone_ros2/simulation/gazebo/worlds/aruco_landing.sdf
+#
+# Terminal 1b — PX4, in a SECOND terminal, once Gazebo's window is open:
+cd ~/PX4-Autopilot/build/px4_sitl_default/rootfs
 export PX4_HOME_LAT=8.5359441
 export PX4_HOME_LON=76.9297242
 export PX4_HOME_ALT=0
-PX4_GZ_WORLD=aruco_landing make px4_sitl gz_x500_lidar_cam_down
+export PX4_SYS_AUTOSTART=4018   # airframe ID for x500_lidar_cam_down
+export PX4_GZ_WORLD=aruco_landing
+~/PX4-Autopilot/build/px4_sitl_default/bin/px4 -d
 # Wait for "Startup script returned successfully" before continuing.
-# NOTE: if this is backgrounded/non-interactive (no real tty) rather than
-# run in a live terminal, PX4's pxh> shell can busy-loop on stdin EOF and
-# fill its log to tens of MB/sec. `< /dev/null` did not stop this when it
-# was tested backgrounded here; holding stdin open on a FIFO did:
-#   mkfifo /tmp/px4_stdin.fifo; exec 3<> /tmp/px4_stdin.fifo
-#   setsid make px4_sitl gz_x500_lidar_cam_down <&3 > px4.log 2>&1 &
-# Not needed if you're just typing this directly into a real terminal.
+# `-d` (daemon mode) is the actual fix for the pxh> shell's stdin-EOF
+# busy-loop — confirmed live: `< /dev/null` alone did NOT stop it when
+# tested against the raw binary (filled a log to 800+MB in under a minute).
+#
+# Or just run both of the above as one command:
+#   ros2 launch drone_bringup px4_sitl.launch.py gz_world:=aruco_landing
 
 # ── Terminal 2 — MAVROS ────────────────────────────────────────────────────
 source /opt/ros/humble/setup.bash
 ros2 launch mavros px4.launch fcu_url:="udp://:14540@127.0.0.1:14580"
 # Wait for "Got HEARTBEAT ... connected" before continuing.
 
-# ── Terminal 3 — Camera Bridge ─────────────────────────────────────────────
+# ── Terminal 3 — Camera Bridge (DEPRIORITIZED — camera doesn't publish in
+# this environment at all right now, likely a WSL GPU/rendering limitation,
+# not just a topic-name issue; skip this terminal for now) ─────────────────
 source /opt/ros/humble/setup.bash
 ros2 run ros_gz_bridge parameter_bridge \
-'/world/default/model/x500_lidar_cam_down_0/link/camera_link/sensor/camera/image@sensor_msgs/msg/Image@gz.msgs.Image'
+'/world/aruco_landing/model/x500_0/model/mono_cam/link/camera_link/sensor/camera/image@sensor_msgs/msg/Image@gz.msgs.Image'
 
 # ── Terminal 4 — All mission nodes (drone_ws2, NOT drone_ws) ───────────────
 source /opt/ros/humble/setup.bash

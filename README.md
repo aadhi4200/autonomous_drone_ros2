@@ -158,16 +158,43 @@ Open **5 terminals** (recommended: Terminator with split panes).
 
 ### Terminal 1 — PX4 SITL + Gazebo
 
+**Note (found 2026-07-10):** `make px4_sitl gz_<model>` below does NOT work on
+PX4 v1.18.0-alpha1+ (`ninja: error: unknown target`) — the per-model ninja
+target generation this relied on was removed upstream. This isn't a recent
+regression on this checkout specifically (it was cloned once and never
+pulled since) — the command in this README was apparently never actually
+re-verified against it. Use the two-process form instead:
+
 ```bash
+# Build once — safe to rerun, no-ops if already built (~10-20min first time).
 cd ~/PX4-Autopilot
-PX4_GZ_WORLD=aruco_landing make px4_sitl gz_x500_lidar_cam_down
+make px4_sitl_default
+
+# Terminal 1a — Gazebo, as its own process:
+export GZ_SIM_RESOURCE_PATH=~/PX4-gazebo-models/models:~/drone_ws2/src/autonomous_drone_ros2/simulation/gazebo/models
+export GZ_SIM_SERVER_CONFIG_PATH=~/PX4-gazebo-models/server.config
+gz sim -r ~/drone_ws2/src/autonomous_drone_ros2/simulation/gazebo/worlds/aruco_landing.sdf
+
+# Terminal 1b — PX4, connecting to the Gazebo process above:
+cd ~/PX4-Autopilot/build/px4_sitl_default/rootfs
+export PX4_SYS_AUTOSTART=4018   # airframe ID for x500_lidar_cam_down — replaces the old gz_<model> target name
+export PX4_GZ_WORLD=aruco_landing
+~/PX4-Autopilot/build/px4_sitl_default/bin/px4 -d
 ```
+
+`-d` (daemon mode) matters: PX4's interactive `pxh>` shell, given no real TTY
+on stdin, spins in a tight prompt-redraw loop instead of blocking — filling
+a log to hundreds of MB in under a minute. `< /dev/null` alone does NOT stop
+this on the raw binary (confirmed by testing); `-d` does.
 
 Wait for:
 ```
 INFO  [px4] Startup script returned successfully
-pxh> 
 ```
+
+`full_stack.launch.py` (drone_bringup) and `launch_full_sim.sh` both already
+implement this corrected two-process boot — prefer those over doing it by
+hand across terminals.
 
 ### Terminal 2 — MAVROS (ROS2 ↔ PX4 bridge)
 
@@ -320,9 +347,14 @@ colcon build --symlink-install --packages-select drone_controller
 
 Full SITL test
 
-# Terminal 1 — PX4 SITL
-cd ~/PX4-Autopilot
-PX4_GZ_WORLD=aruco_landing make px4_sitl gz_x500_lidar_cam_down
+# Terminal 1 — PX4 SITL + Gazebo (see corrected two-process form above —
+# `make px4_sitl gz_x500_lidar_cam_down` does not work on this PX4 version)
+cd ~/PX4-Autopilot && make px4_sitl_default
+GZ_SIM_RESOURCE_PATH=~/PX4-gazebo-models/models:~/drone_ws2/src/autonomous_drone_ros2/simulation/gazebo/models \
+  GZ_SIM_SERVER_CONFIG_PATH=~/PX4-gazebo-models/server.config \
+  gz sim -r ~/drone_ws2/src/autonomous_drone_ros2/simulation/gazebo/worlds/aruco_landing.sdf &
+cd ~/PX4-Autopilot/build/px4_sitl_default/rootfs
+PX4_SYS_AUTOSTART=4018 PX4_GZ_WORLD=aruco_landing ~/PX4-Autopilot/build/px4_sitl_default/bin/px4 -d
 
 # Terminal 2 — MAVROS
 source /opt/ros/humble/setup.bash

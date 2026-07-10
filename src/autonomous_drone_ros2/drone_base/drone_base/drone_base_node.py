@@ -61,6 +61,22 @@ class DroneBaseNode(Node):
             self._cmd_cb,
             10)                  # ← RELIABLE for commands
 
+        # Peer controllers publish their state every 0.5s (see mission_manager's
+        # handoff via /waypoint_nav/command, /aruco_landing/command). While either
+        # is active, IT owns /mavros/setpoint_position/local — this node must not
+        # also stream setpoints, or the two publishers race on the same topic.
+        self.create_subscription(
+            String,
+            "/waypoint_nav/status",
+            self._nav_status_cb,
+            10)
+
+        self.create_subscription(
+            String,
+            "/aruco_landing/status",
+            self._landing_status_cb,
+            10)
+
         # ── Publishers ─────────────────────────────────────────
         self.setpoint_pub = self.create_publisher(
             PoseStamped,
@@ -86,6 +102,8 @@ class DroneBaseNode(Node):
         self._sp_x         = 0.0
         self._sp_y         = 0.0
         self._sp_z         = self.takeoff_altitude
+        self._nav_active     = False
+        self._landing_active = False
 
         # ── Timers ─────────────────────────────────────────────
         self.create_timer(1.0 / SETPOINT_HZ, self._setpoint_loop)
@@ -130,6 +148,12 @@ class DroneBaseNode(Node):
                 and p.z > 0.3
                 and self.drone_status == self.STATUS_ARMED):
             self._update_status(self.STATUS_AIRBORNE)
+
+    def _nav_status_cb(self, msg: String):
+        self._nav_active = (msg.data != "IDLE")
+
+    def _landing_status_cb(self, msg: String):
+        self._landing_active = (msg.data != "IDLE")
 
     def _home_cb(self, msg: HomePosition):
         if self.home_lat is None:
@@ -217,7 +241,14 @@ class DroneBaseNode(Node):
     # ─────────────────────────────────────────────────────────
 
     def _setpoint_loop(self):
-        """Stream setpoints at 20Hz — PX4 requires this for OFFBOARD mode."""
+        """Stream setpoints at 20Hz — PX4 requires this for OFFBOARD mode.
+
+        Suppressed while waypoint_navigator or aruco_landing_node is active —
+        whichever of them is driving the mission owns this topic during that
+        phase, and a second publisher racing on it causes setpoint jitter.
+        """
+        if self._nav_active or self._landing_active:
+            return
         sp = PoseStamped()
         sp.header.stamp    = self.get_clock().now().to_msg()
         sp.header.frame_id = "map"
