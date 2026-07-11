@@ -25,10 +25,11 @@ TAKEOFF_TIMEOUT = 20.0
 NAV_TIMEOUT     = 60.0
 LAND_TIMEOUT    = 30.0
 
+# Default (no upload) mission is a single A->B->home hop per operator
+# request 2026-07-11 -- C/D stops only fly when the website explicitly
+# uploads them (the uploaded sequence always replaces this default).
 DEFAULT_SEQUENCE = [
     ("B", "DELIVERY_B"),
-    ("C", "DELIVERY_C"),
-    ("D", "DELIVERY_D"),
 ]
 
 class MS:
@@ -115,6 +116,19 @@ class MissionManager(Node):
             # from a manual/battery ABORT, which lands in place instead.
             reason = cmd.split(":", 1)[1]
             self._trigger_rth(reason)
+        elif cmd == "RESET" and self.state in (MS.COMPLETE, MS.ABORT):
+            # Nothing ever transitioned COMPLETE/ABORT back to IDLE on its
+            # own -- confirmed live 2026-07-10: every "START" after a
+            # drone's very first mission was silently ignored forever
+            # (self.state == MS.IDLE guard above never matched again),
+            # which reads exactly like "not taking off" from the website
+            # even though the whole stack was healthy. Only reachable from
+            # the two genuinely terminal states -- not from mid-flight
+            # states, so this can't be used to interrupt an active mission.
+            self.get_logger().info("🔄 Mission RESET → IDLE")
+            self.wp_index = 0
+            self.rth_reason = None
+            self._enter(MS.IDLE)
 
     def _loop(self):
         if   self.state == MS.IDLE:          return

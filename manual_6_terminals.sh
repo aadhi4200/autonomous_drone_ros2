@@ -28,15 +28,26 @@
 # Build once (safe to rerun elsewhere, no-op if already built):
 #   cd ~/PX4-Autopilot && make px4_sitl_default
 #
-# Terminal 1a — Gazebo:
+# Terminal 1a — Gazebo SERVER, always headless (-s). A combined server+GUI
+# process corrupts IMU/GPS timestamps under CPU load (confirmed live
+# 2026-07-10: auto preflight disarms + garbage telemetry on the dashboard
+# map). Run the viewer separately (below) when you want the visuals.
 export GZ_SIM_RESOURCE_PATH=~/PX4-gazebo-models/models:~/drone_ws2/src/autonomous_drone_ros2/simulation/gazebo/models:~/PX4-Autopilot/Tools/simulation/gz/models
 export GZ_SIM_SERVER_CONFIG_PATH=~/PX4-gazebo-models/server.config
-gz sim -r ~/drone_ws2/src/autonomous_drone_ros2/simulation/gazebo/worlds/aruco_landing.sdf
+gz sim -r -s ~/drone_ws2/src/autonomous_drone_ros2/simulation/gazebo/worlds/aruco_landing.sdf
+#
+# Terminal 1a-viewer (OPTIONAL, separate terminal) — GUI attached to the
+# headless server above:
+#   gz sim -g
 #
 # Terminal 1b — PX4, in a SECOND terminal, once Gazebo's window is open:
 cd ~/PX4-Autopilot/build/px4_sitl_default/rootfs
-export PX4_HOME_LAT=8.5359441
-export PX4_HOME_LON=76.9297242
+# Home comes from the website's last synced location — NEVER hardcode
+# coordinates here. A literal baked into this file is exactly what kept
+# resurrecting a stale ~850m-off home (confirmed live 2026-07-11: this
+# file's old hardcoded value silently overrode every fresh sync).
+export PX4_HOME_LAT=$(cut -d, -f1 ~/drone_ws2/.last_synced_home)
+export PX4_HOME_LON=$(cut -d, -f2 ~/drone_ws2/.last_synced_home)
 export PX4_HOME_ALT=0
 export PX4_SYS_AUTOSTART=4018   # airframe ID for x500_lidar_cam_down
 export PX4_GZ_WORLD=aruco_landing

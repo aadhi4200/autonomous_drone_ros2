@@ -134,6 +134,23 @@ wait_for_topic() {
   echo "✅ $name topic present (${waited}s)"
 }
 
+wait_for_topic_soft() {
+  # Same as wait_for_topic, but returns 1 on timeout instead of exiting --
+  # for stages whose failure shouldn't be fatal to the rest of the stack.
+  local pattern="$1" timeout="$2" name="$3"
+  local waited=0
+  echo "⏳ Waiting for $name topic (up to ${timeout}s)..."
+  while ! ros2 topic list 2>/dev/null | grep -q "$pattern"; do
+    sleep 1
+    waited=$((waited + 1))
+    if [ "$waited" -ge "$timeout" ]; then
+      return 1
+    fi
+  done
+  echo "✅ $name topic present (${waited}s)"
+  return 0
+}
+
 # ── Stage 1 — PX4 SITL + Gazebo ───────────────────────────────────────────
 echo "── Stage 1/5: PX4 SITL + Gazebo ──"
 if [ -f "$SYNCED_HOME_FILE" ]; then
@@ -158,15 +175,29 @@ fi
 # Gazebo, as its own process — PX4 waits for it internally ("Waiting for
 # Gazebo world..." / "Gazebo world is ready" in its own log), so no separate
 # readiness wait is needed here; the PX4 wait_for_log below covers it.
+#
+# The simulation SERVER always runs headless (-s): a combined server+GUI
+# process corrupts IMU/GPS timestamps under CPU load (confirmed live
+# 2026-07-10 — caused auto preflight disarms and garbage telemetry flung
+# across the dashboard map). When the GUI is wanted, it runs as a separate
+# viewer client (gz sim -g) attached to the headless server, which is the
+# verified-stable configuration.
 (
   export GZ_SIM_RESOURCE_PATH="$GZ_MODEL_STORE/models:$PROJECT_SIM_DIR/models"
   export GZ_SIM_SERVER_CONFIG_PATH="$GZ_MODEL_STORE/server.config"
   [ -n "$PX4_GZ_SIM_RENDER_ENGINE" ] && export PX4_GZ_SIM_RENDER_ENGINE
-  GZ_ARGS=(-r "$PROJECT_SIM_DIR/worlds/$GZ_WORLD.sdf")
-  [ "$HEADLESS" -eq 1 ] && GZ_ARGS+=(-s)
-  gz sim "${GZ_ARGS[@]}"
+  gz sim -r -s "$PROJECT_SIM_DIR/worlds/$GZ_WORLD.sdf"
 ) > "$LOG_DIR/01b_gazebo.log" 2>&1 &
 PIDS+=("$!")
+
+if [ "$HEADLESS" -eq 0 ]; then
+  (
+    [ -n "$PX4_GZ_SIM_RENDER_ENGINE" ] && export PX4_GZ_SIM_RENDER_ENGINE
+    sleep 3   # let the server open its transport endpoints first
+    gz sim -g
+  ) > "$LOG_DIR/01b_gazebo_gui.log" 2>&1 &
+  PIDS+=("$!")
+fi
 
 # PX4 SITL, connecting to the Gazebo process above. `-d` (daemon mode,
 # "don't start pxh shell") is the actual fix for the pxh> shell's stdin-EOF
@@ -200,6 +231,12 @@ PIDS+=("$!")
 wait_for_log "$LOG_DIR/02_mavros.log" "Got HEARTBEAT.*connected" 60 "MAVROS"
 
 # ── Stage 3 — Camera bridge (Gazebo -> ROS2) ──────────────────────────────
+# Non-fatal: a stuck/missing camera topic (known WSL GPU-rendering limitation
+# on this project, plus the CAMERA_MODEL_NAME/"x500_0" mismatch noted above)
+# must not take down the rest of an already-healthy stack. wait_for_topic's
+# own exit 1 on timeout would otherwise fire this script's cleanup trap and
+# kill PX4/Gazebo/MAVROS too -- confirmed live 2026-07-11, this exact failure
+# mode silently nuked a fully-booted stack right after MAVROS connected.
 echo "── Stage 3/5: Camera bridge ──"
 CAMERA_TOPIC="/world/default/model/${CAMERA_MODEL_NAME}/link/camera_link/sensor/camera/image"
 (
@@ -207,7 +244,9 @@ CAMERA_TOPIC="/world/default/model/${CAMERA_MODEL_NAME}/link/camera_link/sensor/
     "${CAMERA_TOPIC}@sensor_msgs/msg/Image@gz.msgs.Image"
 ) > "$LOG_DIR/03_camera_bridge.log" 2>&1 &
 PIDS+=("$!")
-wait_for_topic "$CAMERA_TOPIC" 30 "camera image"
+if ! wait_for_topic_soft "$CAMERA_TOPIC" 30 "camera image"; then
+  echo "⚠️  Camera bridge did not come up (known WSL rendering limitation) — continuing without it."
+fi
 
 # ── Stage 4 — All mission nodes ───────────────────────────────────────────
 echo "── Stage 4/5: Mission nodes (drone_bringup) ──"
@@ -220,7 +259,15 @@ set -u
 PIDS+=("$!")
 # No single "all ready" log line exists across the 6 nodes today — polling
 # /mission/status is the closest real signal that mission_manager is up.
-wait_for_topic "/mission/status" 30 "mission_manager"
+# Soft wait: confirmed live 2026-07-11 that mission_manager was already up
+# and healthily logging its state well inside this window while the topic
+# still hadn't shown up in `ros2 topic list` yet (DDS discovery lag under
+# the CPU load of everything else already running) -- a hard exit here was
+# killing an already-working node stack over a slow-but-fine discovery, the
+# same false-failure shape as the camera bridge fix above.
+if ! wait_for_topic_soft "/mission/status" 30 "mission_manager"; then
+  echo "⚠️  /mission/status not seen in ros2 topic list yet (DDS discovery lag) — check $LOG_DIR/04_full_mission.log; nodes may still be fine."
+fi
 echo "ℹ️  Nodes launched — check $LOG_DIR/04_full_mission.log if any node failed silently."
 sleep 2   # small settle margin for the remaining 5 nodes to finish init
 
