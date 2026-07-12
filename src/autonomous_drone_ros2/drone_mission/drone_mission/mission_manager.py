@@ -13,6 +13,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from std_msgs.msg import String
+from mavros_msgs.msg import State
 from mavros_msgs.srv import SetMode
 from nav_msgs.msg import Odometry
 
@@ -42,6 +43,7 @@ class MS:
     INTER_TAKEOFF  = "INTER_TAKEOFF"
     RETURN_HOME    = "RETURN_HOME"
     HOME_LAND      = "HOME_LAND"
+    PX4_FAILSAFE   = "PX4_FAILSAFE"   # PX4 initiated RTL itself (geofence breach etc.) — stand down
     COMPLETE       = "MISSION_COMPLETE"
     ABORT          = "MISSION_ABORT"
 
@@ -65,6 +67,7 @@ class MissionManager(Node):
         self.create_subscription(String,   "/waypoint_nav/status",  self._nav_cb,     10)
         self.create_subscription(String,   "/aruco_landing/status", self._aruco_cb,   10)
         self.create_subscription(Odometry, "/mavros/local_position/odom", self._odom_cb, sensor_qos)
+        self.create_subscription(State,    "/mavros/state",               self._mavros_state_cb, sensor_qos)
         self.create_subscription(String,   "/mission/command",      self._mission_cmd, 10)
         self.create_subscription(String,   TOPIC_MISSION_WAYPOINTS, self._waypoints_cb, 10)
 
@@ -79,6 +82,7 @@ class MissionManager(Node):
         self.nav_status   = "IDLE"
         self.aruco_status = "IDLE"
         self.altitude     = 0.0
+        self.flight_mode  = ""
 
         self.create_timer(0.2, self._loop)
         self.create_timer(1.0, self._log)
@@ -92,6 +96,19 @@ class MissionManager(Node):
     def _nav_cb(self,   msg): self.nav_status   = msg.data
     def _aruco_cb(self, msg): self.aruco_status = msg.data
     def _odom_cb(self,  msg): self.altitude     = msg.pose.pose.position.z
+
+    def _mavros_state_cb(self, msg):
+        prev = self.flight_mode
+        self.flight_mode = msg.mode
+        # PX4 switching itself to AUTO.RTL mid-mission means one of ITS OWN
+        # failsafes fired (geofence breach, RC loss, etc.). This node never
+        # commands RTL (only AUTO.LAND), so an uncommanded RTL is always
+        # PX4's decision — stand down and let it fly home rather than
+        # fighting it with an in-place-land abort (observed live 2026-07-12:
+        # a geofence breach RTL was cut short by exactly that abort).
+        active = self.state not in (MS.IDLE, MS.COMPLETE, MS.ABORT, MS.PX4_FAILSAFE)
+        if msg.mode == "AUTO.RTL" and prev != "AUTO.RTL" and active:
+            self._px4_failsafe_rtl()
 
     def _waypoints_cb(self, msg):
         try:
@@ -140,6 +157,7 @@ class MissionManager(Node):
         elif self.state == MS.INTER_TAKEOFF: self._inter_takeoff()
         elif self.state == MS.RETURN_HOME:   self._return_home()
         elif self.state == MS.HOME_LAND:     self._home_land()
+        elif self.state == MS.PX4_FAILSAFE:  self._px4_failsafe_wait()
 
     def _preflight(self):
         if self.base_status == "DISCONNECTED":
@@ -241,13 +259,32 @@ class MissionManager(Node):
     def _trigger_rth(self, reason: str):
         """Return-to-home-and-land, for connectivity-loss failsafes. Distinct
         from _abort(): this flies home first instead of landing in place."""
-        if self.state in (MS.IDLE, MS.COMPLETE, MS.ABORT, MS.RETURN_HOME, MS.HOME_LAND):
+        if self.state in (MS.IDLE, MS.COMPLETE, MS.ABORT, MS.RETURN_HOME, MS.HOME_LAND, MS.PX4_FAILSAFE):
             return
         self.get_logger().error(f"🛑 FAILSAFE RTH triggered (reason={reason})")
         self.rth_reason = reason
         self._send_aruco("ABORT")
         self._send_nav("GOTO:A")
         self._enter(MS.RETURN_HOME)
+
+    def _px4_failsafe_rtl(self):
+        """PX4 fired its own failsafe RTL (geofence breach, etc.). Stop our
+        own commanding (setpoint stream, aruco search) and wait for PX4 to
+        finish flying home and landing. Deliberately NO timeout-abort here:
+        commanding AUTO.LAND while PX4 is mid-return would land the drone
+        wherever it happens to be — the exact thing RTL exists to avoid."""
+        self.get_logger().error(
+            f"🛑 PX4 FAILSAFE RTL detected (mode=AUTO.RTL, state={self.state}) — "
+            "standing down, PX4 owns the flight home.")
+        self.rth_reason = "PX4_FAILSAFE_RTL"
+        self._send_aruco("ABORT")
+        self._send_nav("STOP")
+        self._enter(MS.PX4_FAILSAFE)
+
+    def _px4_failsafe_wait(self):
+        if self.base_status == "LANDED":
+            self.get_logger().info("🏁 PX4 failsafe RTL complete — landed.")
+            self._enter(MS.COMPLETE)
 
     def _abort(self):
         """Immediate in-place land — for explicit operator abort, timeouts,
