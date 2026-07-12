@@ -24,7 +24,9 @@ WAIT_ON_GROUND  = 5.0
 ARM_TIMEOUT     = 10.0
 TAKEOFF_TIMEOUT = 20.0
 NAV_TIMEOUT     = 60.0
-LAND_TIMEOUT    = 30.0
+LAND_TIMEOUT    = 45.0  # must outlast the aruco node's own 30s search
+                        # timeout, or ARUCO_LAND's abort fires before the
+                        # FAILED fallback can run (raced live 2026-07-12)
 
 # Default (no upload) mission is a single A->B->home hop per operator
 # request 2026-07-11 -- C/D stops only fly when the website explicitly
@@ -193,16 +195,34 @@ class MissionManager(Node):
             self._goto_next()
 
     def _aruco_land(self):
-        if self._elapsed() > LAND_TIMEOUT:
-            self._abort(); return
+        # Status checks come BEFORE the timeout: the vision search runs a
+        # full 30s before reporting FAILED, so a timeout checked first (and
+        # equal to that 30s) aborted the mission 0.2s before the FAILED
+        # fallback could ever run -- hit live 2026-07-12.
         if self.aruco_status == "COMPLETE":
             self.get_logger().info("✅ ArUco COMPLETE → AUTO.LAND")
             self._auto_land()
             self._enter(MS.WAIT_ON_GROUND)
-        elif self.aruco_status == "FAILED":
+            return
+        if self.aruco_status == "FAILED":
+            # No marker found (camera can't render in WSL, or no pad was
+            # generated for this stop) is NOT a mission-ending emergency:
+            # land on the GPS waypoint without vision guidance and carry on
+            # with the rest of the mission (next stop / return home).
+            _, label = self.mission_sequence[self.wp_index]
+            self.get_logger().warn(
+                f"ArUco marker not found at {label} — landing on GPS "
+                "position without vision guidance and continuing the mission")
+            self._send_aruco("ABORT")  # the aruco node has no STOP cmd; ABORT = reset to IDLE + zero velocity
+            self._auto_land()
+            self._enter(MS.WAIT_ON_GROUND)
+            return
+        if self._elapsed() > LAND_TIMEOUT:
             self._abort()
 
     def _wait(self):
+        if self.base_status != "LANDED":
+            return  # AUTO.LAND still descending — don't start the clock early
         if self.wait_start is None:
             self.wait_start = self.get_clock().now()
             _,label = self.mission_sequence[self.wp_index]
