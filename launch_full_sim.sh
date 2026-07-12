@@ -275,8 +275,22 @@ sleep 2   # small settle margin for the remaining 5 nodes to finish init
 if [ "$WITH_BACKEND" -eq 1 ]; then
   echo "── Stage 5/5: Backend bridge (backend/main.py) ──"
   (
+    # Supervisor: if the backend dies mid-flight, restart it after 2s so the
+    # dashboard comes back on its own (the drone flies on regardless — this
+    # only restores monitoring/control; main.py re-adopts the open mission
+    # row via db.get_open_mission()). The trap keeps Ctrl+C on the main
+    # script working: without it, killing this subshell would orphan the
+    # running python3 instead of stopping it.
     cd "$BACKEND_DIR" || exit 1
-    python3 main.py
+    child=""
+    trap '[ -n "$child" ] && kill "$child" 2>/dev/null; exit 0' INT TERM
+    while true; do
+      python3 main.py &
+      child=$!
+      wait "$child"
+      echo "⚠️  backend exited — auto-restarting in 2s (Ctrl+C the main script to stop for real)"
+      sleep 2
+    done
   ) > "$LOG_DIR/05_backend_bridge.log" 2>&1 &
   PIDS+=("$!")
   # main.py logs "BridgeNode ready" once its ROS2 node + uvicorn thread are up

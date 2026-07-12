@@ -26,6 +26,8 @@ SEARCH_TIMEOUT    = 30.0  # seconds
 
 # ── Connectivity / heartbeat ──────────────────────────
 NODE_HEARTBEAT_STALE_S = 2.0   # a node is considered dead if silent this long
+BATTERY_HEARTBEAT_STALE_S = 5.0  # /mavros/battery publishes ~1 Hz — looser than node heartbeats
+MAVROS_STATE_STALE_S = 3.0       # /mavros/state publishes at 1 Hz — dead if silent this long
 
 # ── Topics ────────────────────────────────────────────
 TOPIC_BASE_STATUS   = "/drone_base/status"
