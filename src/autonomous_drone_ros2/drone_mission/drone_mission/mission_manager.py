@@ -23,7 +23,7 @@ TAKEOFF_ALT     = 5.0
 WAIT_ON_GROUND  = 5.0
 ARM_TIMEOUT     = 10.0
 TAKEOFF_TIMEOUT = 20.0
-NAV_TIMEOUT     = 60.0
+NAV_TIMEOUT     = 120.0  # must cover the navigator's accel-limited profile (its WP_TIMEOUT is also 120)
 LAND_TIMEOUT    = 45.0  # must outlast the aruco node's own 30s search
                         # timeout, or ARUCO_LAND's abort fires before the
                         # FAILED fallback can run (raced live 2026-07-12)

@@ -13,6 +13,10 @@ from nav_msgs.msg import Odometry
 from std_msgs.msg import String
 
 TAKEOFF_ALT = 5.0
+CLIMB_RATE  = 1.0   # m/s — the altitude setpoint ramps at this rate instead
+                    # of stepping straight to TAKEOFF_ALT (a step commands
+                    # PX4's max climb and kicks the IMU; gradual is the
+                    # real-hardware requirement)
 SETPOINT_HZ = 20.0
 
 class DroneBaseNode(Node):
@@ -101,7 +105,8 @@ class DroneBaseNode(Node):
         self.drone_status  = self.STATUS_DISCONNECTED
         self._sp_x         = 0.0
         self._sp_y         = 0.0
-        self._sp_z         = self.takeoff_altitude
+        self._sp_z         = 0.0   # stream ground level until takeoff is commanded
+        self._sp_z_target  = 0.0
         self._nav_active     = False
         self._landing_active = False
 
@@ -206,8 +211,19 @@ class DroneBaseNode(Node):
             return
         self._set_offboard()
         self._arm()
-        self._sp_z = self.takeoff_altitude
-        self.get_logger().info(f"Takeoff → {self.takeoff_altitude}m")
+        # Ramp from the current altitude — _setpoint_loop walks _sp_z toward
+        # the target at CLIMB_RATE instead of stepping the whole way at once.
+        # Hold the CURRENT horizontal position while climbing: the default
+        # _sp_x/_sp_y of (0,0) is home, so a takeoff from a delivery stop
+        # used to be yanked sideways toward home until the navigator took
+        # over (seen live 2026-07-12 as a 3.3 m/s horizontal spike right
+        # after inter-stop liftoff).
+        if self.current_pos:
+            self._sp_x, self._sp_y = self.current_pos[0], self.current_pos[1]
+        self._sp_z = self.current_pos[2] if self.current_pos else 0.0
+        self._sp_z_target = self.takeoff_altitude
+        self.get_logger().info(
+            f"Takeoff → {self.takeoff_altitude}m (ramped at {CLIMB_RATE} m/s)")
 
     def _land(self):
         req = SetMode.Request()
@@ -222,6 +238,7 @@ class DroneBaseNode(Node):
 
     def set_setpoint(self, x, y, z):
         self._sp_x, self._sp_y, self._sp_z = x, y, z
+        self._sp_z_target = z
 
     def get_position(self):   return self.current_pos
     def get_home_gps(self):
@@ -249,6 +266,10 @@ class DroneBaseNode(Node):
         """
         if self._nav_active or self._landing_active:
             return
+        if self._sp_z < self._sp_z_target:
+            self._sp_z = min(self._sp_z + CLIMB_RATE / SETPOINT_HZ, self._sp_z_target)
+        elif self._sp_z > self._sp_z_target:
+            self._sp_z = max(self._sp_z - CLIMB_RATE / SETPOINT_HZ, self._sp_z_target)
         sp = PoseStamped()
         sp.header.stamp    = self.get_clock().now().to_msg()
         sp.header.frame_id = "map"

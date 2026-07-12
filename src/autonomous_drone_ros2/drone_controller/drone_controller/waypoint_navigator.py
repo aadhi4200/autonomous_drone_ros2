@@ -24,7 +24,15 @@ from drone_interfaces.geo import gps_to_local
 from drone_interfaces.constants import TOPIC_MISSION_WAYPOINTS, RTH_ALTITUDE
 
 WP_TOLERANCE = 0.4
-WP_TIMEOUT   = 60.0
+WP_TIMEOUT   = 120.0  # accel-limited flight is slower than the old
+                      # step-setpoint flight; 60s was already borderline
+                      # for a 160m leg at 3 m/s
+# Gradual motion profile (real-hardware requirement): the setpoint "carrot"
+# accelerates/decelerates smoothly instead of handing PX4 the full target as
+# one step input (a 160m step made PX4 pitch hard — big IMU swings).
+NAV_ACCEL        = 1.0   # m/s^2
+NAV_CRUISE_SPEED = 3.0   # m/s, matches the MPC_XY_VEL_MAX default the UI sets
+NAV_MIN_SPEED    = 0.3   # m/s floor so the carrot always finishes
 CRUISE_ALT   = 5.0
 SETPOINT_HZ  = 20.0
 
@@ -168,6 +176,17 @@ class WaypointNavigator(Node):
                                         self.active_wp.lat, self.active_wp.lon)
             self.active_wp_local = (east, north, self.active_wp.alt)
         self.state_start = self.get_clock().now()
+        # Carrot starts from wherever the drone actually is, so the very
+        # first setpoint is right next to it — no step input.
+        sx, sy, sz = self.current_pos if self.current_pos else self.active_wp_local
+        tx, ty, tz = self.active_wp_local
+        dx, dy, dz = tx - sx, ty - sy, tz - sz
+        self.carrot_len = math.sqrt(dx*dx + dy*dy + dz*dz)
+        self.carrot_dir = (dx / self.carrot_len, dy / self.carrot_len, dz / self.carrot_len) \
+            if self.carrot_len > 1e-6 else (0.0, 0.0, 0.0)
+        self.carrot_origin = (sx, sy, sz)
+        self.carrot_s = 0.0
+        self.carrot_v = 0.0
         self.nav_state = self.NAV_NAVIGATING
         self.get_logger().info(f"Navigating → {self.active_wp.label}")
 
@@ -178,7 +197,20 @@ class WaypointNavigator(Node):
         if self.nav_state == self.NAV_NAVIGATING:
             if elapsed > WP_TIMEOUT:
                 self.nav_state = self.NAV_TIMEOUT; self._pub_status(); return
-            self._pub_setpoint(wp_x, wp_y, wp_z)
+            # Trapezoidal speed profile: ramp up at NAV_ACCEL, cruise, and
+            # ramp down so v^2 <= 2*a*remaining — PX4 receives a smoothly
+            # moving target instead of a distant fixed one.
+            dt = 1.0 / SETPOINT_HZ
+            remaining = max(self.carrot_len - self.carrot_s, 0.0)
+            self.carrot_v = min(self.carrot_v + NAV_ACCEL * dt,
+                                NAV_CRUISE_SPEED,
+                                max(math.sqrt(2.0 * NAV_ACCEL * remaining), NAV_MIN_SPEED))
+            self.carrot_s = min(self.carrot_s + self.carrot_v * dt, self.carrot_len)
+            ox, oy, oz = self.carrot_origin
+            cdx, cdy, cdz = self.carrot_dir
+            self._pub_setpoint(ox + cdx * self.carrot_s,
+                               oy + cdy * self.carrot_s,
+                               oz + cdz * self.carrot_s)
             dist = self._dist(wp_x, wp_y, wp_z)
             self.get_logger().info(f"[NAV] → {self.active_wp.label} dist={dist:.2f}m",
                                    throttle_duration_sec=2.0)
