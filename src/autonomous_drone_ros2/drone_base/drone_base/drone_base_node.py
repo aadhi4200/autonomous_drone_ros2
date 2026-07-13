@@ -3,7 +3,7 @@
 drone_base_node.py | Package: drone_base
 Fixed version - properly handles MAVROS state connection
 """
-import rclpy
+import rclpy, math
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 from mavros_msgs.msg import State, HomePosition
@@ -14,6 +14,8 @@ from std_msgs.msg import String
 
 TAKEOFF_ALT = 5.0
 CLIMB_RATE  = 1.0   # m/s — the altitude setpoint ramps at this rate instead
+NUDGE_STEP_M   = 0.6   # meters per manual-nudge press
+YAW_STEP_RAD   = 0.26  # ~15 degrees per manual yaw-nudge press
                     # of stepping straight to TAKEOFF_ALT (a step commands
                     # PX4's max climb and kicks the IMU; gradual is the
                     # real-hardware requirement)
@@ -65,6 +67,16 @@ class DroneBaseNode(Node):
             self._cmd_cb,
             10)                  # ← RELIABLE for commands
 
+        # Manual bench/real-drone-test control (Flight Test Bench page):
+        # directional nudges, isolated on their own topic so they can never
+        # collide with mission-critical TAKEOFF/LAND/ARM/DISARM commands on
+        # /drone_base/command.
+        self.create_subscription(
+            String,
+            "/manual/nudge",
+            self._manual_nudge_cb,
+            10)
+
         # Peer controllers publish their state every 0.5s (see mission_manager's
         # handoff via /waypoint_nav/command, /aruco_landing/command). While either
         # is active, IT owns /mavros/setpoint_position/local — this node must not
@@ -109,6 +121,11 @@ class DroneBaseNode(Node):
         self._sp_z_target  = 0.0
         self._nav_active     = False
         self._landing_active = False
+        self.current_yaw   = 0.0   # tracked for manual-nudge body->world rotation
+        self._sp_yaw        = 0.0  # yaw setpoint; 0.0 preserves the exact
+                                    # pre-existing identity-quaternion hold
+                                    # behavior until a manual yaw nudge is
+                                    # actually issued -- purely additive
 
         # ── Timers ─────────────────────────────────────────────
         self.create_timer(1.0 / SETPOINT_HZ, self._setpoint_loop)
@@ -148,6 +165,8 @@ class DroneBaseNode(Node):
     def _odom_cb(self, msg: Odometry):
         p = msg.pose.pose.position
         self.current_pos = (p.x, p.y, p.z)
+        q = msg.pose.pose.orientation
+        self.current_yaw = math.atan2(2*(q.w*q.z + q.x*q.y), 1 - 2*(q.y*q.y + q.z*q.z))
         # Auto-detect airborne
         if (self.vehicle_state.armed
                 and p.z > 0.3
@@ -196,6 +215,58 @@ class DroneBaseNode(Node):
         req.value = False
         self.arming_client.call_async(req)
         self.get_logger().info("Disarm requested")
+        self._sp_x = self._sp_y = self._sp_z = self._sp_z_target = 0.0
+        self._sp_yaw = 0.0
+
+    def _manual_nudge_cb(self, msg: String):
+        """Bench/real-drone manual control: small position/yaw nudges,
+        one per message (the frontend repeats while a button is held).
+        Body-frame forward/right, rotated into world ENU by the drone's
+        OWN current yaw -- same pattern already used for ArUco alignment
+        velocity in aruco_landing_node.
+        Never interferes with an active mission: nav_active/landing_active
+        already gate the setpoint loop this feeds, and the backend also
+        rejects manual commands server-side while a mission is running.
+        """
+        if self._nav_active or self._landing_active:
+            return
+        if not self.vehicle_state.armed or self.current_pos is None:
+            return
+        cmd = msg.data.strip().upper()
+        if cmd == "HOLD":
+            # Re-anchor to the ACTUAL current pose -- stops any queued
+            # nudges from continuing to walk the setpoint further.
+            self._sp_x, self._sp_y, self._sp_z = self.current_pos
+            self._sp_z_target = self._sp_z
+            self._sp_yaw = self.current_yaw
+            return
+        # Right = 90deg CLOCKWISE from forward (facing East, right is
+        # South): world_dx = fwd*cos + right*sin, world_dy = fwd*sin -
+        # right*cos. Caught by an isolated unit test 2026-07-13 -- the
+        # first version had this sign backwards (LEFT/RIGHT swapped),
+        # found because live SITL verification was too flaky (WSL EKF
+        # altitude glitches) to trust for this, so the rotation math was
+        # proven with a standalone test instead of a live flight.
+        c, sn = math.cos(self.current_yaw), math.sin(self.current_yaw)
+        def world_delta(fwd, right):
+            return (fwd * c + right * sn, fwd * sn - right * c)
+        dx = dy = dz = dyaw = 0.0
+        if   cmd == "FWD":       dx, dy = world_delta(NUDGE_STEP_M, 0)
+        elif cmd == "BACK":      dx, dy = world_delta(-NUDGE_STEP_M, 0)
+        elif cmd == "RIGHT":     dx, dy = world_delta(0, NUDGE_STEP_M)
+        elif cmd == "LEFT":      dx, dy = world_delta(0, -NUDGE_STEP_M)
+        elif cmd == "UP":        dz = NUDGE_STEP_M
+        elif cmd == "DOWN":      dz = -NUDGE_STEP_M
+        elif cmd == "YAW_RIGHT": dyaw = -YAW_STEP_RAD
+        elif cmd == "YAW_LEFT":  dyaw = YAW_STEP_RAD
+        else:
+            self.get_logger().warn(f"Unknown manual nudge: {cmd}")
+            return
+        self._sp_x += dx
+        self._sp_y += dy
+        self._sp_z = max(0.3, self._sp_z + dz)  # never nudge below 0.3m
+        self._sp_z_target = self._sp_z
+        self._sp_yaw += dyaw
 
     def _set_offboard(self):
         req = SetMode.Request()
@@ -276,7 +347,8 @@ class DroneBaseNode(Node):
         sp.pose.position.x = self._sp_x
         sp.pose.position.y = self._sp_y
         sp.pose.position.z = self._sp_z
-        sp.pose.orientation.w = 1.0
+        sp.pose.orientation.z = math.sin(self._sp_yaw / 2.0)
+        sp.pose.orientation.w = math.cos(self._sp_yaw / 2.0)
         self.setpoint_pub.publish(sp)
 
     def _status_loop(self):
