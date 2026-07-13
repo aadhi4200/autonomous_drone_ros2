@@ -183,10 +183,18 @@ fi
 # viewer client (gz sim -g) attached to the headless server, which is the
 # verified-stable configuration.
 (
-  export GZ_SIM_RESOURCE_PATH="$GZ_MODEL_STORE/models:$PROJECT_SIM_DIR/models"
+  # PX4-Autopilot ships the x500_lidar_cam_down model (and its mono_cam /
+  # LW20 parts) in its own tree, NOT in PX4-gazebo-models -- without this
+  # entry gz cannot resolve the model and PX4 silently spawns the plain
+  # x500 with NO camera at all (found 2026-07-13: world had x500_0 with
+  # zero image topics).
+  export GZ_SIM_RESOURCE_PATH="$HOME/PX4-Autopilot/Tools/simulation/gz/models:$GZ_MODEL_STORE/models:$PROJECT_SIM_DIR/models"
   export GZ_SIM_SERVER_CONFIG_PATH="$GZ_MODEL_STORE/server.config"
   [ -n "$PX4_GZ_SIM_RENDER_ENGINE" ] && export PX4_GZ_SIM_RENDER_ENGINE
-  gz sim -r -s "$PROJECT_SIM_DIR/worlds/$GZ_WORLD.sdf"
+  # --headless-rendering: camera/lidar sensors need a render engine even
+  # on the display-less server (EGL offscreen); without it the camera
+  # sensor never creates its image topic.
+  gz sim -r -s --headless-rendering "$PROJECT_SIM_DIR/worlds/$GZ_WORLD.sdf"
 ) > "$LOG_DIR/01b_gazebo.log" 2>&1 &
 PIDS+=("$!")
 
@@ -207,6 +215,10 @@ fi
 (
   cd "$PX4_DIR/build/px4_sitl_default/rootfs" || exit 1
   export PX4_SYS_AUTOSTART
+  # Where PX4 resolves the model SDF it spawns (px4-rc.gzsim builds a
+  # file://.../<model>/model.sdf URI from this). Never set anywhere before,
+  # so the URI was file:///x500/... and the camera model could not load.
+  export PX4_GZ_MODELS="/home/aadhi/PX4-Autopilot/Tools/simulation/gz/models"
   export PX4_GZ_WORLD="$GZ_WORLD"
   if [ -n "${PX4_HOME_LAT:-}" ]; then
     export PX4_HOME_LAT PX4_HOME_LON PX4_HOME_ALT
@@ -238,10 +250,11 @@ wait_for_log "$LOG_DIR/02_mavros.log" "Got HEARTBEAT.*connected" 60 "MAVROS"
 # kill PX4/Gazebo/MAVROS too -- confirmed live 2026-07-11, this exact failure
 # mode silently nuked a fully-booted stack right after MAVROS connected.
 echo "── Stage 3/5: Camera bridge ──"
-CAMERA_TOPIC="/world/default/model/${CAMERA_MODEL_NAME}/link/camera_link/sensor/camera/image"
+CAMERA_TOPIC="/world/${GZ_WORLD}/model/${CAMERA_MODEL_NAME}/link/camera_link/sensor/camera/image"
 (
   ros2 run ros_gz_bridge parameter_bridge \
-    "${CAMERA_TOPIC}@sensor_msgs/msg/Image@gz.msgs.Image"
+    "${CAMERA_TOPIC}@sensor_msgs/msg/Image@gz.msgs.Image" \
+    --ros-args -r "${CAMERA_TOPIC}:=/camera/image_raw"
 ) > "$LOG_DIR/03_camera_bridge.log" 2>&1 &
 PIDS+=("$!")
 if ! wait_for_topic_soft "$CAMERA_TOPIC" 30 "camera image"; then
