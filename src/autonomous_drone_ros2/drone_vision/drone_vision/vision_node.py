@@ -70,6 +70,14 @@ class VisionNode(Node):
         except Exception as e:
             self.get_logger().warn(str(e), throttle_duration_sec=5.0); return
 
+        # Center from the ACTUAL frame, not the IMAGE_W/H constants: the
+        # sim camera is 1280x960 while the constants said 640x480, so a
+        # perfectly centered marker read as offset (320,240) and the drone
+        # aligned to the wrong quadrant of the image (seen live 2026-07-13:
+        # constant ~317px x-offset, marker drifted out of frame on descent).
+        self.cx = frame.shape[1] / 2.0
+        self.cy = frame.shape[0] / 2.0
+
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         corners, ids, _ = self._detect(gray)
         if ids is None: return

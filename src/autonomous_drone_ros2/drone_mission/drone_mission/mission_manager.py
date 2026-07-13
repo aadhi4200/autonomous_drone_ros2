@@ -202,6 +202,12 @@ class MissionManager(Node):
         if self.aruco_status == "COMPLETE":
             self.get_logger().info("✅ ArUco COMPLETE → AUTO.LAND")
             self._auto_land()
+            # Reset the aruco node to IDLE now: drone_base suppresses its own
+            # setpoint stream while aruco status != IDLE, so leaving it in
+            # COMPLETE starves OFFBOARD of setpoints and the next
+            # INTER_TAKEOFF can never arm (found live 2026-07-13, the first
+            # time the COMPLETE path ever ran).
+            self._send_aruco("ABORT")
             self._enter(MS.WAIT_ON_GROUND)
             return
         if self.aruco_status == "FAILED":

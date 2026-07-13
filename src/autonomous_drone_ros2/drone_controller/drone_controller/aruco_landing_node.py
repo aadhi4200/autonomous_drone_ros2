@@ -21,6 +21,8 @@ LAND_ALTITUDE    = 0.3
 LOSS_TIMEOUT     = 2.0
 SEARCH_TIMEOUT   = 30.0
 MAX_ALIGN_VEL    = 0.5
+BLIND_LAND_ALTITUDE = 2.5  # below this, a marker lost mid-DESCEND finishes
+                           # the landing blind instead of re-searching
 
 class ArucoLandingNode(Node):
     STATE_IDLE     = "IDLE"
@@ -40,7 +42,12 @@ class ArucoLandingNode(Node):
         self.create_subscription(Odometry,     "/mavros/local_position/odom", self._odom_cb,   sensor_qos)
         self.create_subscription(String,       "/aruco_landing/command",      self._cmd_cb,    10)
 
-        self.vel_pub      = self.create_publisher(TwistStamped, "/mavros/setpoint_velocity/cmd_vel_unstamped", 10)
+        # cmd_vel takes TwistStamped; cmd_vel_unstamped takes plain Twist.
+        # Publishing TwistStamped on the _unstamped topic was a silent type
+        # mismatch (the project's classic failure mode): PX4 received ZERO
+        # setpoints during ALIGN, lost the offboard stream, and fired its
+        # RTL failsafe ~2s after every marker lock (seen live 2026-07-13).
+        self.vel_pub      = self.create_publisher(TwistStamped, "/mavros/setpoint_velocity/cmd_vel", 10)
         self.setpoint_pub = self.create_publisher(PoseStamped,  "/mavros/setpoint_position/local", 10)
         self.status_pub   = self.create_publisher(String,       "/aruco_landing/status", 10)
         self.target_id_pub = self.create_publisher(Int32,       TOPIC_VISION_TARGET_ID, 10)
@@ -107,11 +114,26 @@ class ArucoLandingNode(Node):
         sp.pose.orientation.w = math.cos(self.search_yaw/2.0)
         self.setpoint_pub.publish(sp)
 
+    def _error_to_world_vel(self, ex, ey):
+        """Pixel error -> ENU world velocity, corrected for current yaw.
+
+        Down-camera mounted rpy (0, 1.5707, 0): image-right = body -y,
+        image-down = body -x. The old mapping ignored yaw entirely, which is
+        only correct at one heading -- and after the search spin the heading
+        is arbitrary."""
+        v_bx = self._clamp(-ALIGN_KP*ey, -MAX_ALIGN_VEL, MAX_ALIGN_VEL)
+        v_by = self._clamp(-ALIGN_KP*ex, -MAX_ALIGN_VEL, MAX_ALIGN_VEL)
+        c, sn = math.cos(self.current_yaw), math.sin(self.current_yaw)
+        return (v_bx*c - v_by*sn, v_bx*sn + v_by*c)
+
     def _align(self, alt):
-        if not self.marker_detected: return
+        if not self.marker_detected:
+            # Keep the offboard stream alive -- a gap >1s trips PX4's
+            # offboard-loss failsafe mid-landing.
+            self._pub_vel(0, 0, 0)
+            return
         ex,ey = self.marker_offset_x, self.marker_offset_y
-        vx = self._clamp( ALIGN_KP*ex, -MAX_ALIGN_VEL, MAX_ALIGN_VEL)
-        vy = self._clamp(-ALIGN_KP*ey, -MAX_ALIGN_VEL, MAX_ALIGN_VEL)
+        vx, vy = self._error_to_world_vel(ex, ey)
         self._pub_vel(vx, vy, 0.0)
         err = math.sqrt(ex*ex+ey*ey)
         self.get_logger().info(f"[ALIGN] err={err:.1f}px", throttle_duration_sec=1.0)
@@ -121,8 +143,7 @@ class ArucoLandingNode(Node):
     def _descend(self, alt):
         if not self.marker_detected: self._pub_vel(0,0,0); return
         ex,ey = self.marker_offset_x, self.marker_offset_y
-        vx = self._clamp( ALIGN_KP*ex, -MAX_ALIGN_VEL, MAX_ALIGN_VEL)
-        vy = self._clamp(-ALIGN_KP*ey, -MAX_ALIGN_VEL, MAX_ALIGN_VEL)
+        vx, vy = self._error_to_world_vel(ex, ey)
         self._pub_vel(vx, vy, -DESCEND_RATE)
         self.get_logger().info(f"[DESCEND] alt={alt:.2f}m", throttle_duration_sec=1.0)
         if alt < LAND_ALTITUDE: self._enter(self.STATE_LAND)
@@ -135,8 +156,21 @@ class ArucoLandingNode(Node):
         if self.landing_state not in [self.STATE_ALIGN, self.STATE_DESCEND]: return
         if self.last_detection is None: return
         if (self.get_clock().now()-self.last_detection).nanoseconds*1e-9 > LOSS_TIMEOUT:
-            self.get_logger().warn("Marker lost → SEARCH")
             self.marker_detected = False
+            # Blind final descent: losing the marker LOW during DESCEND is
+            # normal (the marker fills/leaves the tilting camera view near
+            # the ground) and we were already centered when DESCEND began --
+            # finish the landing instead of wastefully re-searching from a
+            # position that is already on target (seen live 2026-07-13:
+            # centered at 11px error, then a re-search at 2.1m burned 30s
+            # and gave up).
+            alt = self.current_pos[2] if self.current_pos else 99.0
+            if self.landing_state == self.STATE_DESCEND and alt < BLIND_LAND_ALTITUDE:
+                self.get_logger().info(
+                    f"Marker lost at {alt:.1f}m during DESCEND — already centered, landing blind")
+                self._enter(self.STATE_LAND)
+                return
+            self.get_logger().warn("Marker lost → SEARCH")
             self._enter(self.STATE_SEARCH)
 
     def _pub_vel(self, vx, vy, vz):

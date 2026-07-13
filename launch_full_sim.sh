@@ -257,7 +257,7 @@ CAMERA_TOPIC="/world/${GZ_WORLD}/model/${CAMERA_MODEL_NAME}/link/camera_link/sen
     --ros-args -r "${CAMERA_TOPIC}:=/camera/image_raw"
 ) > "$LOG_DIR/03_camera_bridge.log" 2>&1 &
 PIDS+=("$!")
-if ! wait_for_topic_soft "$CAMERA_TOPIC" 30 "camera image"; then
+if ! wait_for_topic_soft "/camera/image_raw" 30 "camera image"; then
   echo "⚠️  Camera bridge did not come up (known WSL rendering limitation) — continuing without it."
 fi
 
