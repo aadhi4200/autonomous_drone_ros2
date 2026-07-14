@@ -7,7 +7,7 @@
         <geometry><box><size>2.0 2.0 0.001</size></box></geometry>
         <material>
           <diffuse>1 1 1 1</diffuse>
-          <pbr><metal><albedo_map>model://aruco_pad_D/materials/textures/aruco_20.png</albedo_map></metal></pbr>
+          <pbr><metal><albedo_map>model://aruco_pad_D/materials/textures/aruco_19.png</albedo_map></metal></pbr>
         </material>
       </visual>
       <collision name="collision">
