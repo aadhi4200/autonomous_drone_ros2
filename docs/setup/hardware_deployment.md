@@ -295,3 +295,121 @@ Found during exploration; the guide works around all of them today:
    and backend should be `systemd` services that start on boot, so a field power cycle
    needs no SSH session. (The backend already survives restarts via its supervisor +
    mission-adoption logic from 2026-07-12.)
+
+---
+
+## Appendix A — Full install command reference (Pi 5 / Jetson)
+
+Copy-paste sequence expanding §3. Run stages in order.
+
+### A.0 Operating system
+
+**Raspberry Pi 5:** flash **Ubuntu Server 22.04 LTS 64-bit** with Raspberry Pi Imager
+(⚠️ not Raspberry Pi OS — ROS 2 Humble requires Ubuntu 22.04). Set user/WiFi in the
+imager, then:
+
+```bash
+sudo apt update && sudo apt full-upgrade -y
+sudo apt install -y git curl nano htop
+```
+
+**Jetson Orin Nano:** flash **JetPack 6** (Ubuntu 22.04-based) from NVIDIA. Then:
+
+```bash
+sudo apt update && sudo apt full-upgrade -y
+sudo nvpmodel -m 0 && sudo jetson_clocks     # max performance mode
+```
+
+⚠️ Original (non-Orin) Jetson Nano is stuck on Ubuntu 18.04 — Humble won't install
+natively (Docker only). Prefer Pi 5 or Orin Nano (the roadmap targets Orin).
+
+### A.1 ROS 2 Humble (identical on both)
+
+```bash
+sudo apt install -y software-properties-common
+sudo add-apt-repository universe -y
+sudo curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
+     -o /usr/share/keyrings/ros-archive-keyring.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu $(. /etc/os-release && echo $UBUNTU_CODENAME) main" \
+     | sudo tee /etc/apt/sources.list.d/ros2.list > /dev/null
+sudo apt update
+sudo apt install -y ros-humble-ros-base ros-dev-tools python3-colcon-common-extensions
+echo "source /opt/ros/humble/setup.bash" >> ~/.bashrc && source ~/.bashrc
+```
+
+(`ros-base` = no GUI tools — right for a headless companion computer.)
+
+### A.2 MAVROS + OAK-D + Python deps
+
+```bash
+sudo apt install -y ros-humble-mavros ros-humble-mavros-extras
+sudo bash /opt/ros/humble/lib/mavros/install_geographiclib_datasets.sh   # required once
+
+sudo apt install -y ros-humble-depthai-ros
+echo 'SUBSYSTEM=="usb", ATTRS{idVendor}=="03e7", MODE="0666"' | \
+  sudo tee /etc/udev/rules.d/80-movidius.rules
+sudo udevadm control --reload-rules && sudo udevadm trigger
+
+sudo apt install -y ros-humble-cv-bridge python3-opencv python3-pip
+#  Jetson: if `python3 -c "import cv2"` already works (NVIDIA's build), SKIP
+#  python3-opencv and never pip-install opencv-python over it.
+pip3 install fastapi uvicorn pydantic
+
+sudo usermod -aG dialout $USER      # Pixhawk serial access; relogin afterwards
+```
+
+### A.3 Workspace (same commands as the WSL install)
+
+```bash
+mkdir -p ~/drone_ws2/src && cd ~/drone_ws2/src
+git clone https://github.com/aadhi4200/autonomous_drone_ros2.git
+git clone https://github.com/aadhi4200/Drone-A-to-B-waypoint-Nav-system.git frontend_bridge
+cd ~/drone_ws2
+source /opt/ros/humble/setup.bash
+colcon build --base-paths src/autonomous_drone_ros2/src/autonomous_drone_ros2
+#  (never --symlink-install — setup.cfg gotcha, same as WSL)
+echo "source ~/drone_ws2/install/setup.bash" >> ~/.bashrc && source ~/.bashrc
+```
+
+### A.4 Frontend
+
+Recommended: build on the laptop/WSL (Node is slow on a Pi), copy `dist/` over:
+
+```bash
+# laptop/WSL:
+cd ~/drone_ws2/src/frontend_bridge
+VITE_API_URL=http://10.42.0.1:8000 npm run build     # 10.42.0.1 = Pi hotspot IP
+scp -r dist/ <user>@<pi-ip>:~/drone_ws2/src/frontend_bridge/
+```
+
+Or build on the companion:
+
+```bash
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
+source ~/.bashrc && nvm install 20
+cd ~/drone_ws2/src/frontend_bridge && npm install
+VITE_API_URL=http://10.42.0.1:8000 npm run build
+```
+
+Serve: `npx vite preview --host 0.0.0.0 --port 3000`
+(or `cd dist && python3 -m http.server 3000`).
+
+### A.5 Pi-only: enable GPIO UART (TELEM2 wiring only; USB needs none of this)
+
+```bash
+sudo sed -i '$ a enable_uart=1' /boot/firmware/config.txt
+sudo sed -i 's/console=serial0,115200 //' /boot/firmware/cmdline.txt
+sudo reboot
+# Pixhawk TELEM2 link is then /dev/ttyAMA0 (or /dev/serial0)
+```
+
+### A.6 Field WiFi hotspot
+
+```bash
+sudo nmcli device wifi hotspot ssid droneAP password YourPassword ifname wlan0
+nmcli connection modify Hotspot connection.autoconnect yes
+# companion is always 10.42.0.1 → website at http://10.42.0.1:3000
+```
+
+Reminder: the one required code edit — add `"http://10.42.0.1:3000"` to
+`allow_origins` in `backend/main.py` (~line 56) — is described in §4 step 6.
