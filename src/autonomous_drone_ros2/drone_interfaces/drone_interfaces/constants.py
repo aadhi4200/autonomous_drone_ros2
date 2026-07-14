@@ -25,7 +25,7 @@ WAIT_ON_GROUND    = 5.0   # seconds (payload drop)
 SEARCH_TIMEOUT    = 30.0  # seconds
 
 # ── Connectivity / heartbeat ──────────────────────────
-NODE_HEARTBEAT_STALE_S = 2.0   # a node is considered dead if silent this long
+NODE_HEARTBEAT_STALE_S = 6.0   # a node is considered dead if silent this long (3x slowest 1 Hz heartbeat; 2.0 false-fired under WSL CPU-load timer slips, seen 5x on 2026-07-13)
 BATTERY_HEARTBEAT_STALE_S = 5.0  # /mavros/battery publishes ~1 Hz — looser than node heartbeats
 MAVROS_STATE_STALE_S = 3.0       # /mavros/state publishes at 1 Hz — dead if silent this long
 

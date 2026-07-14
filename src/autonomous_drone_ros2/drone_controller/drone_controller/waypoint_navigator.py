@@ -21,6 +21,7 @@ from std_msgs.msg import String
 from mavros_msgs.msg import HomePosition
 
 from drone_interfaces.geo import gps_to_local
+from std_msgs.msg import Float64
 from drone_interfaces.constants import TOPIC_MISSION_WAYPOINTS, RTH_ALTITUDE
 
 WP_TOLERANCE = 0.4
@@ -86,6 +87,8 @@ class WaypointNavigator(Node):
         self.create_subscription(HomePosition, "/mavros/home_position/home",  self._home_cb, sensor_qos)
         self.create_subscription(String,       "/waypoint_nav/command",       self._cmd_cb,  10)
         self.create_subscription(String,       TOPIC_MISSION_WAYPOINTS,       self._waypoints_cb, 10)
+        self.ground_z = 0.0  # EKF z-drift snapshot from mission_manager (0 = no drift)
+        self.create_subscription(Float64, "/mission/ground_z", self._ground_z_cb, 10)
 
         self.setpoint_pub = self.create_publisher(PoseStamped, "/mavros/setpoint_position/local", 10)
         self.status_pub   = self.create_publisher(String,      "/waypoint_nav/status", 10)
@@ -157,6 +160,9 @@ class WaypointNavigator(Node):
                 f"alt={wp.get('alt', CRUISE_ALT)} marker_id={wp.get('marker_id')}")
         self.uploaded = True
 
+    def _ground_z_cb(self, msg):
+        self.ground_z = msg.data
+
     def _cmd_cb(self, msg):
         cmd = msg.data.strip().upper()
         if cmd.startswith("GOTO:"): self._start_nav(cmd.split(":")[1])
@@ -167,14 +173,17 @@ class WaypointNavigator(Node):
             self.get_logger().warn("Home GPS not yet confirmed by MAVROS — using unsynced fallback home!")
         if key == "A":
             self.active_wp = Waypoint(self.home_lat, self.home_lon, alt=RTH_ALTITUDE, label="HOME")
-            self.active_wp_local = (0.0, 0.0, RTH_ALTITUDE)
+            self.active_wp_local = (0.0, 0.0, RTH_ALTITUDE + self.ground_z)
         else:
             if key not in self.waypoints:
                 self.get_logger().error(f"Unknown WP: {key}"); return
             self.active_wp = self.waypoints[key]
             north, east = gps_to_local(self.home_lat, self.home_lon,
                                         self.active_wp.lat, self.active_wp.lon)
-            self.active_wp_local = (east, north, self.active_wp.alt)
+            # Offset by the EKF z-drift snapshot from mission_manager: with
+            # e.g. +5m of drift, an absolute 2.5m target is physically below
+            # the ground and PX4 flies the drone into the terrain.
+            self.active_wp_local = (east, north, self.active_wp.alt + self.ground_z)
         self.state_start = self.get_clock().now()
         # Carrot starts from wherever the drone actually is, so the very
         # first setpoint is right next to it — no step input.

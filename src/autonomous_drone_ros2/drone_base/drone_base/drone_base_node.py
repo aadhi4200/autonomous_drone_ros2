@@ -292,7 +292,12 @@ class DroneBaseNode(Node):
         if self.current_pos:
             self._sp_x, self._sp_y = self.current_pos[0], self.current_pos[1]
         self._sp_z = self.current_pos[2] if self.current_pos else 0.0
-        self._sp_z_target = self.takeoff_altitude
+        # Relative to the ground reading at arm time: EKF z drifts several
+        # metres per landing cycle in SITL, so an absolute target can sit at
+        # or below the believed altitude while physically on the ground --
+        # the ramp then finishes instantly and the drone never lifts off
+        # (2nd consecutive mission never took off, seen live 2026-07-14).
+        self._sp_z_target = self._sp_z + self.takeoff_altitude
         self.get_logger().info(
             f"Takeoff → {self.takeoff_altitude}m (ramped at {CLIMB_RATE} m/s)")
 
