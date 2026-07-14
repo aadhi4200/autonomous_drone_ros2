@@ -55,6 +55,11 @@ class MissionManager(Node):
 
         self.mission_sequence = list(DEFAULT_SEQUENCE)
         self.marker_ids  = {}   # label -> marker_id, from the frontend upload
+        self.land_mode   = "aruco"          # "aruco" = vision precision landing at each
+                                            # stop; "gps" = plain AUTO.LAND on the GPS
+                                            # waypoint, no marker needed (operator choice)
+        self.wait_s      = WAIT_ON_GROUND   # ground wait before the next takeoff,
+                                            # adjustable per mission from the website
         self.uploaded    = False
         self.wp_index    = 0
         self.state       = MS.IDLE
@@ -123,8 +128,16 @@ class MissionManager(Node):
             return
         self.mission_sequence = [(wp.get("label", "B"), f"DELIVERY_{wp.get('label','B')}") for wp in data]
         self.marker_ids = {wp.get("label", "B"): wp.get("marker_id") for wp in data}
+        if data:
+            self.land_mode = data[0].get("land_mode") or "aruco"
+            try:
+                self.wait_s = max(0.0, float(data[0].get("wait_s") or WAIT_ON_GROUND))
+            except (TypeError, ValueError):
+                self.wait_s = WAIT_ON_GROUND
         self.uploaded = True
-        self.get_logger().info(f"Mission sequence from upload: {[k for k,_ in self.mission_sequence]}")
+        self.get_logger().info(
+            f"Mission sequence from upload: {[k for k,_ in self.mission_sequence]} "
+            f"| landing={self.land_mode} | ground wait={self.wait_s}s")
 
     def _mission_cmd(self, msg):
         cmd = msg.data.strip().upper()
@@ -190,8 +203,15 @@ class MissionManager(Node):
             self._abort(); return
         if self.nav_status == "ARRIVED":
             key, label = self.mission_sequence[self.wp_index]
-            self.get_logger().info(f"✅ Arrived {label} → ArUco landing")
             self._send_nav("STOP")
+            if self.land_mode == "gps":
+                # Operator chose no-marker landing: plain AUTO.LAND on the GPS
+                # waypoint — same path the ArUco FAILED fallback already uses.
+                self.get_logger().info(f"✅ Arrived {label} → GPS landing (no marker)")
+                self._auto_land()
+                self._enter(MS.WAIT_ON_GROUND)
+                return
+            self.get_logger().info(f"✅ Arrived {label} → ArUco landing")
             marker_id = self.marker_ids.get(key) or ARUCO_MARKER_ID
             self._send_aruco(f"START:{marker_id}")
             self._enter(MS.ARUCO_LAND)
@@ -236,10 +256,10 @@ class MissionManager(Node):
         if self.wait_start is None:
             self.wait_start = self.get_clock().now()
             _,label = self.mission_sequence[self.wp_index]
-            self.get_logger().info(f"📦 Payload drop at {label} — waiting {WAIT_ON_GROUND}s")
+            self.get_logger().info(f"📦 Payload drop at {label} — waiting {self.wait_s}s")
             return
         elapsed = (self.get_clock().now()-self.wait_start).nanoseconds*1e-9
-        if elapsed >= WAIT_ON_GROUND:
+        if elapsed >= self.wait_s:
             self.wait_start = None
             self.wp_index  += 1
             self._record_ground_alt()
