@@ -23,6 +23,9 @@ def generate_launch_description():
     mode = LaunchConfiguration('mode')
     is_sim = PythonExpression(["'", mode, "' == 'sim'"])
     is_hardware = PythonExpression(["'", mode, "' == 'hardware'"])
+    # Nodes follow Gazebo /clock in sim (bridged below) so their timers and
+    # timeouts scale with the sim's real-time factor; wall clock on hardware.
+    sim_time_params = [{'use_sim_time': is_sim}]
 
     return LaunchDescription([
         DeclareLaunchArgument('mode', default_value='sim',
@@ -31,7 +34,10 @@ def generate_launch_description():
         ExecuteProcess(
             condition=IfCondition(is_sim),
             cmd=['ros2', 'run', 'ros_gz_bridge', 'parameter_bridge',
-                 f'{GAZEBO_CAM_TOPIC}@sensor_msgs/msg/Image@gz.msgs.Image'],
+                 f'{GAZEBO_CAM_TOPIC}@sensor_msgs/msg/Image@gz.msgs.Image',
+                 # one-way gz->ROS /clock bridge: the single source of sim
+                 # time for every node launched with use_sim_time
+                 '/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock'],
             output='screen',
         ),
         # camera_node just republishes the Gazebo-bridged topic onto
@@ -39,9 +45,10 @@ def generate_launch_description():
         # node publishes /camera/image_raw itself, so camera_node has
         # nothing to do there.
         Node(package='drone_camera', executable='camera_node', name='camera_node',
-             output='screen', condition=IfCondition(is_sim)),
+             output='screen', condition=IfCondition(is_sim), parameters=sim_time_params),
         # vision_node is source-agnostic — runs in both modes unchanged.
-        Node(package='drone_vision', executable='vision_node', name='vision_node', output='screen'),
+        Node(package='drone_vision', executable='vision_node', name='vision_node',
+             output='screen', parameters=sim_time_params),
 
         LogInfo(
             condition=IfCondition(is_hardware),
