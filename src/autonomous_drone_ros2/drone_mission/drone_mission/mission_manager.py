@@ -142,6 +142,12 @@ class MissionManager(Node):
     def _mission_cmd(self, msg):
         cmd = msg.data.strip().upper()
         if cmd == "START" and self.state == MS.IDLE:
+            if not self.mission_sequence:
+                self.get_logger().warn(
+                    "START ignored — no waypoints uploaded (the previous "
+                    "mission's plan was cleared at COMPLETE/ABORT). "
+                    "Upload a mission first.")
+                return
             self.get_logger().info("🚀 Mission START")
             self._enter(MS.PREFLIGHT)
         elif cmd == "ABORT":
@@ -371,6 +377,21 @@ class MissionManager(Node):
         self.state = new; self.state_start = self.get_clock().now()
         self.wait_start = None
         msg = String(); msg.data = new; self.status_pub.publish(msg)
+        if new in (MS.COMPLETE, MS.ABORT):
+            self._clear_mission_data(new)
+
+    def _clear_mission_data(self, why):
+        """A finished/aborted mission's plan must not survive into the next
+        session: stale stops (here and in waypoint_navigator) are how a
+        post-mission Test Bench arm ended up flying diagonally toward the
+        previous map waypoint (seen live 2026-07-17). The next mission needs
+        a fresh /mission/waypoints upload — START with no plan is rejected."""
+        self.mission_sequence = []
+        self.marker_ids = {}
+        self.uploaded = False
+        self.wp_index = 0
+        self._send_nav("CLEAR")
+        self.get_logger().info(f"🧹 Mission plan cleared ({why})")
 
     def _elapsed(self):
         if self.state_start is None: return 0.0

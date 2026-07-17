@@ -140,7 +140,18 @@ class DroneBaseNode(Node):
     def _state_cb(self, msg: State):
         """Receives MAVROS state — MUST use BEST_EFFORT QoS."""
         prev_connected = self.vehicle_state.connected
+        prev_armed     = self.vehicle_state.armed
         self.vehicle_state = msg
+
+        # ANY disarm — commanded or PX4's own auto-disarm after the final
+        # mission landing — invalidates the streamed setpoint. After a
+        # mission it still pointed at the LAST delivery stop (+takeoff alt),
+        # set by the inter-stop _arm_and_offboard and never cleared
+        # (auto-disarm skips _disarm()), so the next OFFBOARD entry from the
+        # Test Bench flew diagonally to the previous waypoint (seen live
+        # 2026-07-17). Re-anchor to wherever the drone actually is.
+        if prev_armed and not msg.armed:
+            self._anchor_setpoint_here()
 
         # Log when connection status changes
         if not prev_connected and msg.connected:
@@ -215,8 +226,20 @@ class DroneBaseNode(Node):
         req.value = False
         self.arming_client.call_async(req)
         self.get_logger().info("Disarm requested")
-        self._sp_x = self._sp_y = self._sp_z = self._sp_z_target = 0.0
-        self._sp_yaw = 0.0
+        # Anchor to the actual pose, not (0,0,0): zeros mean "home", which
+        # is its own stale-setpoint trap if the drone was disarmed anywhere
+        # else (an in-place abort landing at a delivery stop, for example).
+        self._anchor_setpoint_here()
+
+    def _anchor_setpoint_here(self):
+        """Point the 20Hz OFFBOARD stream at the drone's current pose so a
+        later mode switch holds position instead of chasing a stale target."""
+        if self.current_pos is not None:
+            self._sp_x, self._sp_y, self._sp_z = self.current_pos
+        else:
+            self._sp_x = self._sp_y = self._sp_z = 0.0
+        self._sp_z_target = self._sp_z
+        self._sp_yaw = self.current_yaw
 
     def _manual_nudge_cb(self, msg: String):
         """Bench/real-drone manual control: small position/yaw nudges,
@@ -280,8 +303,10 @@ class DroneBaseNode(Node):
         if not self.vehicle_state.connected:
             self.get_logger().error("Cannot takeoff — MAVROS not connected")
             return
-        self._set_offboard()
-        self._arm()
+        # Aim the setpoint stream BEFORE requesting OFFBOARD/arm: PX4
+        # latches onto whatever is streaming the instant the mode switch
+        # lands, so setting the target only afterwards leaves a window where
+        # a stale setpoint (a previous mission's last stop) gets chased.
         # Ramp from the current altitude — _setpoint_loop walks _sp_z toward
         # the target at CLIMB_RATE instead of stepping the whole way at once.
         # Hold the CURRENT horizontal position while climbing: the default
@@ -298,6 +323,8 @@ class DroneBaseNode(Node):
         # the ramp then finishes instantly and the drone never lifts off
         # (2nd consecutive mission never took off, seen live 2026-07-14).
         self._sp_z_target = self._sp_z + self.takeoff_altitude
+        self._set_offboard()
+        self._arm()
         self.get_logger().info(
             f"Takeoff → {self.takeoff_altitude}m (ramped at {CLIMB_RATE} m/s)")
 

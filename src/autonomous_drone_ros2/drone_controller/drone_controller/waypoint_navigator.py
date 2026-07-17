@@ -167,6 +167,13 @@ class WaypointNavigator(Node):
         cmd = msg.data.strip().upper()
         if cmd.startswith("GOTO:"): self._start_nav(cmd.split(":")[1])
         elif cmd == "STOP": self.nav_state = self.NAV_IDLE
+        elif cmd == "CLEAR":
+            # Mission ended — drop the flown plan so nothing can ever
+            # navigate to a previous mission's stops. Next upload repopulates.
+            self.nav_state = self.NAV_IDLE
+            self.waypoints = {}
+            self.uploaded = False
+            self.get_logger().info("\U0001F9F9 Waypoints cleared (mission ended) — awaiting next upload")
 
     def _start_nav(self, key):
         if not self.home_is_real:
